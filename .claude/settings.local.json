@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(iconv -f UTF-16LE -t UTF-8 '/c/Users/MrGammoudi/Desktop/World from 0/harness.out')",
+      "Bash(npx esbuild *)",
+      "Bash(node scripts/.simCheck.mjs)",
+      "Bash(break)"
+    ]
+  }
+}
