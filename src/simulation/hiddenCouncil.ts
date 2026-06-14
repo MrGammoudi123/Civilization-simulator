@@ -11,7 +11,7 @@ import type { Agent, CouncilInterventionKind, HiddenCouncilState, WorldState } f
 /**
  * The Hidden Council (Phase 10): a secret manipulation layer the user can enable. Rewritten
  * from a fixed-interval timer that endlessly re-ran `suppress_memory` on dead agents into an
- * AI-director that:
+ * director that:
  *   • keeps a LIVE watchlist (dead agents are pruned; new watched chosen by curiosity,
  *     intelligence, leadership and suspicion),
  *   • SELECTS interventions from world conditions and never repeats a useless one (it will

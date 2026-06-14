@@ -10,7 +10,7 @@ import type {
 } from './types';
 
 /**
- * Rule-based language system (NO LLM). Agents compose short, context-driven messages from
+ * Rule-based language system. Agents compose short, context-driven messages from
  * their state, role, recent memory, relationships, and their tribe/city situation. Messages
  * surface as speech bubbles and in the (filterable) Conversations panel. Deterministic: every
  * random choice goes through the passed RNG.

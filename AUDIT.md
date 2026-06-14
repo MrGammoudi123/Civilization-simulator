@@ -29,7 +29,7 @@ instead of a *civilization cycle*.
 | 9 | Relationship graph leaks the dead | **1264 of 2556** directed relationships among the living (**49%**) point to dead agents |
 | 10 | Thin history | 1500 samples but only 8 fields each (no protests / revolutions / births / natural-energy / discovery-risk / ideology / era) |
 
-Note two findings from the prompt that were **not** reproduced in *this* snapshot (they are
+Note two of the reported issues that were **not** reproduced in *this* snapshot (they are
 real *latent* risks the code does not prevent, rather than corruption present here):
 tribe `338`'s `memberIds` actually matched its 187 living members exactly, and the cached
 `economy.totalEnergy` (8127.5) is consistent once city/tribe treasuries (~305) are added to
@@ -81,8 +81,6 @@ phase; old **v1 saves must keep loading** throughout.
 14. **Performance & stability** — caps + cleanup cadence for 1M-cycle runs.
 15. **Tests** — headless scenarios for every phase + the long-run check.
 
-Progress is tracked in `.ai_workflow/PHASE_PLAN.md`.
-
 ---
 
 ## Final Deliverables (all 15 phases implemented)
@@ -117,7 +115,7 @@ population above the original ~200 (toward ~350), which slows very long *synchro
 candidate follow-up. Civil-war faction-splitting reuses the emergent tribe re-formation rather
 than a bespoke faction system.
 
-**6. How to test with the uploaded save.**
+**6. How to test with a save.**
 ```
 npx esbuild scripts/phase1Check.ts --bundle --format=esm --platform=node --outfile=scripts/.p1.mjs
 node scripts/.p1.mjs "<path>/genesis-save-2026-06-14-12-43-15.json"   # 19/19
@@ -133,4 +131,4 @@ successors rebuilding on them, **910** cooperative/cultural memories (vs the sav
 a Hidden Council that watches only the living and never spams `suppress_memory`, and energy
 that recovers after a population crash (fill 0.4% → 20%) instead of permanent starvation.
 
-**Status: `tsc` 0 errors · headless harness 93/93 · uploaded v1 save 19/19 · production build clean.**
+**Status: `tsc` 0 errors · headless harness 93/93 · v1 save 19/19 · production build clean.**
