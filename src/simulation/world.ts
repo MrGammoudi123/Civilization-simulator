@@ -10,13 +10,14 @@ import { updateRevolutions } from './revolution';
 import { computeEconomy, emptyEconomy } from './economy';
 import { emptyEcology, updateEcology } from './ecology';
 import { assignRoles } from './roles';
+import { updateCultures } from './culture';
 import { recordGenesis, updateChronicle } from './chronicle';
 import { createCouncil, updateHiddenCouncil } from './hiddenCouncil';
 import { adjust, ensureRel, pruneDeadRelationships } from './relationships';
 import { sanitizeDeadMemory } from './memory';
 import { checkMembershipConsistency } from './validation';
 import { devWarn, isDev } from './dev';
-import type { Agent, BackgroundNode, EnergySource, Tribe, WorldParams, WorldState } from './types';
+import type { Agent, BackgroundNode, CultureMemory, EnergySource, Tribe, WorldParams, WorldState } from './types';
 
 export const DEFAULT_PARAMS = WORLD_PARAMS;
 
@@ -82,6 +83,11 @@ export function generateWorld(seed: number, params: WorldParams = WORLD_PARAMS):
     milestones: [],
     history: [],
     hiddenCouncil: createCouncil(),
+    // Autonomous intelligence (save v3) — empty at genesis; populated by W7/W8.
+    discoveries: [],
+    cultures: [],
+    nextDiscoveryId: 0,
+    nextSymbolSeq: 0,
   };
   recordGenesis(world);
   return world;
@@ -93,6 +99,8 @@ const neighborScratch: number[] = [];
 const byId = new Map<number, Agent>();
 // Reusable id->tribe index, rebuilt each tick (lets decisions check tribe relations/war).
 const tribesById = new Map<number, Tribe>();
+// Reusable tribeId->culture index, rebuilt each tick (W11 — O(1) culture lookup in decisions).
+const cultureByTribe = new Map<number, CultureMemory>();
 
 /**
  * Advance the world by a single tick:
@@ -121,13 +129,15 @@ export function stepWorld(world: WorldState, rng: RNG, grid: SpatialGrid): void 
   }
   tribesById.clear();
   for (let i = 0; i < world.tribes.length; i++) tribesById.set(world.tribes[i].id, world.tribes[i]);
+  cultureByTribe.clear();
+  if (world.cultures) for (const c of world.cultures) if (!c.archived) cultureByTribe.set(c.tribeId, c);
 
   // 3 + 4. update + reproduction
   const births: Agent[] = [];
   for (let i = 0; i < agents.length; i++) {
     const a = agents[i];
     if (!a.alive) continue;
-    updateAgent(a, world, grid, byId, tribesById, rng);
+    updateAgent(a, world, grid, byId, tribesById, cultureByTribe, rng);
     if (a.alive && canReproduce(a, agents.length + births.length, world, grid, rng)) {
       a.energy -= SIM.reproduceCost;
       a.reproduceCooldown = SIM.reproduceCooldown;
@@ -161,6 +171,7 @@ export function stepWorld(world: WorldState, rng: RNG, grid: SpatialGrid): void 
     world.economy = computeEconomy(world);
     updateEcology(world, rng);
     assignRoles(world);
+    if (SIM.enableCulture) updateCultures(world);
     updateHiddenCouncil(world, rng);
     updateChronicle(world);
     if (world.conflictPulses.length > 0) {

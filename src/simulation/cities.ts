@@ -1,6 +1,7 @@
 import { RNG } from './rng';
-import { CITY, CIV } from './config';
+import { CITY, CIV, SIM } from './config';
 import { recordEvent } from './chronicle';
+import { inheritCulture } from './culture';
 import { remember } from './memory';
 import { emptyPolitics } from './revolution';
 import type { Agent, BuildingType, City, CityBuilding, CityRuin, Tribe, TribeIdeology, WorldState } from './types';
@@ -186,6 +187,8 @@ function createCity(world: WorldState, tribe: Tribe, members: Agent[], rng: RNG)
     name = ruin.rebuiltCount > 1 ? `${ruin.name} ${roman(ruin.rebuiltCount)}` : `New ${ruin.name}`;
     if (tribe.foundedCycle >= ruin.fallCycle && world.cycle - ruin.fallCycle <= CIV.rebuildBonusCycles) {
       tribe.ideology = ruin.ideology; // inherited ideology for a swift successor
+      // W8 — a swift successor also inherits a fragment of a fallen culture (norms/myths).
+      if (SIM.enableCulture) inheritCulture(world, tribe.id);
     }
     recordEvent(world, {
       category: 'culture',

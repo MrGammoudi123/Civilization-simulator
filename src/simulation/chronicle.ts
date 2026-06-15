@@ -135,6 +135,11 @@ export function computeEra(world: WorldState): string {
 }
 
 function sampleHistory(world: WorldState): void {
+  // W10 — autonomous-intelligence series
+  const words = new Set<string>();
+  for (const a of world.agents) if (a.lexicon) for (const tk of a.lexicon.tokens) words.add(tk.token);
+  let cultureEls = 0;
+  for (const c of world.cultures ?? []) cultureEls += c.norms.length + c.laws.length + c.taboos.length + c.myths.length;
   world.history.push({
     cycle: world.cycle,
     population: world.agents.length,
@@ -154,6 +159,9 @@ function sampleHistory(world: WorldState): void {
     manipulation: world.hiddenCouncil ? world.hiddenCouncil.manipulation : 0,
     dominantIdeology: dominantIdeology(world),
     eraLabel: world.era,
+    languageDiversity: words.size,
+    discoveries: Array.isArray(world.discoveries) ? world.discoveries.length : 0,
+    cultures: cultureEls,
   });
   if (world.history.length > CHRONICLE.historyCap) world.history.shift();
 }
@@ -177,6 +185,75 @@ function maybeEraSummary(world: WorldState): void {
       `${(world.ecology ? world.ecology.scarcityIndex * 100 : 0).toFixed(0)}%, ` +
       `council suspicion ${(world.hiddenCouncil ? world.hiddenCouncil.discoveryRisk * 100 : 0).toFixed(0)}%.`,
   });
+}
+
+/**
+ * W1.6 — record an event unless one with the same title fired within `window` cycles. Lets
+ * recurring (non-first-of-kind) events be logged without spamming. Scans only the recent tail.
+ */
+function recordThrottled(world: WorldState, window: number, e: EventInput): void {
+  const lo = Math.max(0, world.chronicle.length - 120);
+  for (let i = world.chronicle.length - 1; i >= lo; i--) {
+    if (world.chronicle[i].title === e.title) {
+      if (world.cycle - world.chronicle[i].cycle < window) return;
+      break;
+    }
+  }
+  recordEvent(world, e);
+}
+
+/**
+ * W1.6 — recurring world-state transition detectors. The chronicle used to fall silent after the
+ * opening act (only first-of-kind milestones + a 25k era summary), so a 100k run logged 0 non-era
+ * events across its last 25k cycles. These throttled detectors keep the late game alive: energy
+ * booms/collapses, long famine, investigator surges, mass migration, cult gatherings. Compares
+ * against the previous history sample (the last entry — the new one is pushed afterwards).
+ */
+function recurringEvents(world: WorldState): void {
+  const agents = world.agents;
+  let alive = 0;
+  let investigators = 0;
+  let migrating = 0;
+  let worshipping = 0;
+  for (const a of agents) {
+    if (!a.alive) continue;
+    alive += 1;
+    if (a.role === 'investigator') investigators += 1;
+    if (a.state === 'migrating') migrating += 1;
+    else if (a.state === 'worshipping') worshipping += 1;
+  }
+  if (alive === 0) return;
+
+  const scarcity = world.ecology ? world.ecology.scarcityIndex : 0;
+  const prev = world.history.length ? world.history[world.history.length - 1] : null;
+  const prevScarcity = prev && typeof prev.scarcityIndex === 'number' ? prev.scarcityIndex : scarcity;
+
+  // energy boom / collapse — a sharp swing in field scarcity since the previous sample
+  if (prevScarcity > 0.7 && scarcity < 0.4) {
+    recordThrottled(world, 6000, { category: 'economy', severity: 2, title: 'Energy Boom', description: 'The energy field swelled — abundance returned to the land.' });
+  } else if (prevScarcity < 0.55 && scarcity > 0.85) {
+    recordThrottled(world, 6000, { category: 'collapse', severity: 3, title: 'Energy Collapse', description: 'The energy field crashed — scarcity gripped the world.' });
+  }
+
+  // a long, grinding famine
+  if (scarcity > 0.92) {
+    recordThrottled(world, 25000, { category: 'collapse', severity: 3, title: 'The Long Famine', description: `Cycle ${world.cycle}: the field lay all but exhausted, and hunger became a way of life.` });
+  }
+
+  // a surge of investigators (Council suspicion taking visible social form)
+  if (investigators / alive > 0.2) {
+    recordThrottled(world, 15000, { category: 'discovery', severity: 2, title: 'Investigators Multiply', description: `A wave of seekers turned to investigating the anomalies of the world (${investigators} of ${alive}).` });
+  }
+
+  // a mass migration
+  if (migrating / alive > 0.15) {
+    recordThrottled(world, 12000, { category: 'social', severity: 2, title: 'A Great Migration', description: 'Whole groups pulled up roots and moved on in search of a living.' });
+  }
+
+  // a cult gathers around the sacred / a prophet
+  if (worshipping / alive > 0.15) {
+    recordThrottled(world, 15000, { category: 'culture', severity: 2, title: 'A Cult Gathers', description: 'Crowds gathered to worship — faith spread through the people.' });
+  }
 }
 
 /** Detect first-of-kind milestones and take a metric sample. Run each economy interval. */
@@ -279,7 +356,18 @@ export function updateChronicle(world: WorldState): void {
   }
 
   // Phase 6/8 — current era + periodic era summaries (keeps the late game from going silent).
+  const prevEra = world.era;
   world.era = computeEra(world);
+  if (world.cycle > 0 && world.era !== prevEra) {
+    recordThrottled(world, 5000, {
+      category: 'era',
+      severity: 3,
+      title: `Era: ${world.era}`,
+      description: `The age turned from ${prevEra} to ${world.era}.`,
+    });
+  }
   maybeEraSummary(world);
+  // W1.6 — recurring transition events so a long run is never silent between era summaries.
+  recurringEvents(world);
   sampleHistory(world);
 }

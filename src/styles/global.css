@@ -591,6 +591,15 @@ body {
   flex-shrink: 0;
 }
 
+/* W10 — estimated meaning of an emergent token phrase */
+.conv-gloss {
+  color: var(--a1, #5ad1c4);
+  font-size: 10.5px;
+  font-style: italic;
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
 .tone-neutral {
   background: #c9d6ee;
 }
@@ -1053,6 +1062,13 @@ body {
   color: var(--t3);
   font-size: 10.5px;
   margin-top: 4px;
+}
+
+/* W10 — autonomous-intelligence inspector block */
+.ai-mind {
+  margin: 6px 0 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--b, #21262d);
 }
 
 /* ----------------------------------------------------------------- modal */

@@ -54,6 +54,18 @@ export const SIM = {
 
   // spatial index
   spatialCellSize: 80,
+
+  // W3 — utility-driven action selection for "normal life" (fed agents). Survival/fear/protest/
+  // hunger remain hard overrides. Flag lets the legacy priority cascade be restored for A/B + tests.
+  useUtilityBrain: true,
+  // W4 — lifetime learning: agents update action preferences from the reward each choice earns.
+  enableLearning: true,
+  // W6 — emergent language: agents speak invented tokens grounded in meaning, not fixed sentences.
+  emergentLanguage: true,
+  // W7 — autonomous experimentation: agents discover techniques by probing world materials.
+  enableDiscovery: true,
+  // W8 — culture: norms/laws/taboos/myths emerge from repeated events and bias (not dictate) behavior.
+  enableCulture: true,
 } as const;
 
 /** Tribe formation / dynamics tunables. */
@@ -72,6 +84,12 @@ export const TRIBE = {
   titheFrac: 0.08, // surplus fraction contributed to the shared pool per update
   feedFrac: 0.35, // starving members are fed up to this energy fraction from the pool
   historyCap: 24,
+  // W1.2 — bounded treasury. The shared pool is capped (base + per-capita), tithing tapers as
+  // it fills (diminishing returns), and it decays slowly (spoilage), so a fed tribe can no
+  // longer accumulate unbounded shared energy (the 959k Council-ON overflow in the audit).
+  sharedEnergyBaseCap: 80,
+  sharedEnergyPerCapita: 14, // cap ≈ 80 + 14·members
+  sharedEnergyDecay: 0.01, // fraction shed per update (waste / spoilage)
 } as const;
 
 /** City formation / economy tunables. */
@@ -115,6 +133,16 @@ export const COUNCIL = {
   suspicion50: 0.5,
   suspicion75: 0.75,
   suspicion90: 0.9,
+  // W1.3 — bend, don't rescue. Energy creation is rare + condition-limited (it was the engine
+  // of the Council-ON utopia: 154 sources vs 70, zero starvation, zero revolutions), and when
+  // the world is *too* calm the council destabilizes instead of helping.
+  spawnPopFloor: 45, // spawn_energy only near genuine extinction (was <70 — fired constantly)
+  spawnScarcityFloor: 0.9, // spawn_hidden_energy only under near-total scarcity (was 0.85)
+  spawnCooldown: 1500, // min cycles between council energy spawns
+  protectHealFrac: 0.35, // protect_leader/false_miracle heal a fraction of maxEnergy (was full)
+  overStableUnrest: 0.18, // below this unrest …
+  overStableInequality: 0.16, // … and this inequality (with no recent revolt) ⇒ destabilize
+  calmRevolutionWindow: 8000, // "no recent revolution" window for the over-stable check
 } as const;
 
 /** Resource-ecology tunables (Phase 4). Drives cyclical scarcity → recovery. */
@@ -125,8 +153,20 @@ export const ECOLOGY = {
   bloomPressure: 0.6, // recoveryPressure at/above which a recovery bloom can fire
   bloomCooldown: 2500, // min cycles between recovery blooms
   bloomSources: 2, // sources created per bloom (emergency relief, kept small)
-  maxSources: 70, // only +6 over the base 64 — relief, not a carrying-capacity glut
+  maxSources: 70, // baseline ceiling at the founding population (~90)
   collapseFloor: 0.06, // natural-energy fill fraction below which collapseRisk maxes out
+  // W1.5 — population-scaled carrying capacity + stronger relief under *sustained* critical
+  // scarcity, so a depleted world has a real recovery path (scarcity becomes cyclical, not a
+  // permanent Dark Age floor) while energy stays finite (hard absolute ceiling).
+  // Tuned (W1.5 iteration): carrying capacity is *relief*, modestly above the 64/70 baseline —
+  // enough that a depleted field can recover (cyclical scarcity), not so much that the world
+  // becomes permanently abundant and pins at the population cap.
+  sourcesPerAgent: 0.045, // carrying capacity grows with the harvesting population …
+  absoluteMaxSources: 96, // … but never past this (energy is never infinite)
+  criticalScarcity: 0.93, // sustained scarcity above this …
+  criticalPressure: 0.85, // … plus this much built-up pressure ⇒ a larger renewal bloom
+  bloomSourcesCritical: 3, // sources per *renewal* bloom under prolonged critical scarcity
+  bloomCooldownCritical: 1800, // shorter cooldown while the field is critically scarce
 } as const;
 
 /** Chronicle + history-sampling tunables. */

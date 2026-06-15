@@ -3,6 +3,7 @@ import { TRIBE } from './config';
 import { sentiment } from './relationships';
 import { remember } from './memory';
 import { recordEvent } from './chronicle';
+import { loseDiscoveriesOnCollapse } from './discovery';
 import { SpatialGrid } from './spatialGrid';
 import type { Agent, ArchivedTribe, Tribe, TribeIdeology, WorldState } from './types';
 
@@ -199,13 +200,22 @@ function recomputeTribe(tribe: Tribe, members: Agent[], cycle: number): void {
     logHistory(tribe, cycle, `turned ${tribe.ideology}`);
   }
 
-  // shared energy: surplus tithe in, starving fed out
+  // shared energy: surplus tithe in (bounded), starving fed out, slow spoilage decay.
+  // W1.2 — the pool is capped (base + per-capita) and tithing tapers as it fills, so a
+  // well-fed tribe can no longer hoard unbounded energy (the audit's 959k Council-ON overflow).
+  const cap = TRIBE.sharedEnergyBaseCap + TRIBE.sharedEnergyPerCapita * members.length;
   for (const m of members) {
+    if (tribe.sharedEnergy >= cap) break;
     const frac = m.energy / m.maxEnergy;
     if (frac > 0.8) {
-      const take = (m.energy - 0.8 * m.maxEnergy) * TRIBE.titheFrac;
-      m.energy -= take;
-      tribe.sharedEnergy += take;
+      const fillRatio = cap > 0 ? tribe.sharedEnergy / cap : 1;
+      const headroom = cap - tribe.sharedEnergy;
+      // diminishing returns: contribute less the closer the pool is to its cap
+      const take = Math.min((m.energy - 0.8 * m.maxEnergy) * TRIBE.titheFrac * (1 - fillRatio), headroom);
+      if (take > 0) {
+        m.energy -= take;
+        tribe.sharedEnergy += take;
+      }
     }
   }
   for (const m of members) {
@@ -219,6 +229,9 @@ function recomputeTribe(tribe: Tribe, members: Agent[], cycle: number): void {
       }
     }
   }
+  // hard ceiling + spoilage decay (excess bleeds away rather than compounding forever)
+  if (tribe.sharedEnergy > cap) tribe.sharedEnergy = cap;
+  tribe.sharedEnergy *= 1 - TRIBE.sharedEnergyDecay;
 
   // stability = loyalty toward leader + low inequality + treasury adequacy
   let loy = 0;
@@ -289,6 +302,8 @@ export function updateTribes(world: WorldState, grid: SpatialGrid, rng: RNG): vo
       if (members) for (const m of members) m.tribeId = null;
       // Archive the fallen tribe (don't silently discard) before it leaves the active set.
       archiveTribe(world, tribe, members ?? []);
+      // W7 — the tribe's un-archived technical knowledge is lost with it (archived tech survives).
+      loseDiscoveriesOnCollapse(world, tribe.id);
       // A once-substantial tribe falling apart is a notable collapse.
       if (tribe.population >= 8) {
         recordEvent(world, {

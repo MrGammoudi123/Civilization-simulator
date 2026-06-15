@@ -41,6 +41,11 @@ export function TribesPanel({ tribes }: { tribes: TribeSummary[] }) {
                 <Bar k="Aggression" v={t.aggressionLevel} />
                 <Bar k="Inequality" v={t.inequalityLevel} />
                 <TRow k="Shared energy" v={t.sharedEnergy.toFixed(0)} />
+                {t.techLevel > 0 && <TRow k="Technology" v={`${t.techLevel} discovered`} />}
+                {t.cultureNorms.length > 0 && <TRow k="Values" v={t.cultureNorms.join(', ')} />}
+                {t.cultureTaboos.length > 0 && <TRow k="Taboos" v={t.cultureTaboos.join(', ')} />}
+                {t.cultureMyths.length > 0 && <TRow k="Myths" v={t.cultureMyths.join(', ')} />}
+                {t.dialect.length > 0 && <TRow k="Dialect" v={t.dialect.join(' · ')} />}
                 {t.atWarWith.length > 0 && <TRow k="Enemies" v={t.atWarWith.join(', ')} />}
               </div>
             </div>

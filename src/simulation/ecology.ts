@@ -67,9 +67,27 @@ export function computeEcology(world: WorldState): EcologyMetrics {
 }
 
 /**
+ * The world's current carrying capacity in number of sources (W1.5). It scales with the
+ * harvesting population — more mouths earn a higher ceiling of relief — but is hard-capped at
+ * `absoluteMaxSources` so energy is never infinite. Both ecology blooms and (W1.3) the Hidden
+ * Council's energy spawns respect this single ceiling.
+ */
+export function currentMaxSources(world: WorldState): number {
+  const pop = world.agents.length; // post-cull (all alive at the batch boundary)
+  return Math.min(
+    ECOLOGY.absoluteMaxSources,
+    ECOLOGY.maxSources + Math.floor(pop * ECOLOGY.sourcesPerAgent),
+  );
+}
+
+/**
  * Advance the ecology one batch: measure it, build/relax recovery pressure, and fire a
  * recovery bloom when sustained scarcity warrants it. Called every economy interval from
  * stepWorld. Deterministic (all randomness flows through the world RNG).
+ *
+ * W1.5 — prolonged *critical* scarcity earns a larger "renewal" bloom on a shorter cooldown, so
+ * a depleted world has a genuine recovery path (scarcity becomes cyclical instead of a permanent
+ * Dark Age floor). Capacity scales with population via `currentMaxSources`; energy stays finite.
  */
 export function updateEcology(world: WorldState, rng: RNG): void {
   const ec = computeEcology(world);
@@ -80,11 +98,20 @@ export function updateEcology(world: WorldState, rng: RNG): void {
   }
   world.ecology = ec;
 
-  const cooledDown = world.cycle - ec.lastRecoveryCycle >= ECOLOGY.bloomCooldown;
-  if (ec.recoveryPressure >= ECOLOGY.bloomPressure && cooledDown && world.energySources.length < ECOLOGY.maxSources) {
-    const kinds: EnergyKind[] = ['renewable', 'renewable', 'deep', 'hidden'];
+  const maxSrc = currentMaxSources(world);
+  const critical =
+    ec.scarcityIndex >= ECOLOGY.criticalScarcity && ec.recoveryPressure >= ECOLOGY.criticalPressure;
+  const cooldown = critical ? ECOLOGY.bloomCooldownCritical : ECOLOGY.bloomCooldown;
+  const want = critical ? ECOLOGY.bloomSourcesCritical : ECOLOGY.bloomSources;
+  const cooledDown = world.cycle - ec.lastRecoveryCycle >= cooldown;
+
+  if (ec.recoveryPressure >= ECOLOGY.bloomPressure && cooledDown && world.energySources.length < maxSrc) {
+    // renewal blooms favor the non-collapsing backbone (renewable/deep) so relief actually holds
+    const kinds: EnergyKind[] = critical
+      ? ['renewable', 'renewable', 'deep', 'renewable', 'deep']
+      : ['renewable', 'renewable', 'deep', 'hidden'];
     let spawned = 0;
-    for (let i = 0; i < ECOLOGY.bloomSources && world.energySources.length < ECOLOGY.maxSources; i++) {
+    for (let i = 0; i < want && world.energySources.length < maxSrc; i++) {
       const kind = kinds[i % kinds.length];
       const src = createEnergySource(world.nextEnergyId++, rng, world.params, kind);
       src.amount = src.capacity * rng.range(0.6, 1.0); // blooms arrive fairly full
@@ -98,8 +125,8 @@ export function updateEcology(world: WorldState, rng: RNG): void {
     if (spawned > 0) {
       recordEvent(world, {
         category: 'discovery',
-        severity: 2,
-        title: 'New Springs',
+        severity: critical ? 3 : 2,
+        title: critical ? 'A Great Renewal' : 'New Springs',
         description: `As scarcity bit deep, ${spawned} energy sources welled up in the distant wilds.`,
       });
     }

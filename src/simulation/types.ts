@@ -178,6 +178,10 @@ export interface Agent {
   speakCooldown: number; // counts down in decision intervals
   bubble: SpeechBubble | null;
   alive: boolean;
+  // Autonomous intelligence (save v3). Optional so v1/v2 agents migrate forward; seeded on
+  // creation and on load, populated by the learning (W4) and language (W6) systems.
+  brain?: AgentBrain;
+  lexicon?: AgentLexicon;
 }
 
 /** Message categories from the spec. Some are sparse until their systems exist (trade →
@@ -223,6 +227,12 @@ export interface ConversationMessage {
   x: number;
   y: number;
   tribeId: number | null;
+  // W6 — emergent language: the raw invented token phrase the agent actually "spoke", plus the
+  // UI's estimated meaning (from the tokens' meaning vectors) and confidence. Optional so older
+  // messages/saves remain valid; `text` carries the token phrase when present.
+  tokens?: string[];
+  estimatedMeaning?: string;
+  confidence?: number;
 }
 
 /** Transient speech shown above an agent until `until` (a cycle number). */
@@ -249,6 +259,13 @@ export interface AgentDetail {
   relationships: number;
   x: number;
   y: number;
+  // W10 — autonomous-intelligence inspector fields
+  lastReward: number; // last learning reward (W4)
+  knownSymbols: number; // lexicon size (W6)
+  dialectWord: string | null; // a representative invented word the agent uses
+  suspicionEvidence: number; // personal council-suspicion evidence (W1.4/W9)
+  topCulture: string | null; // strongest cultural influence on this agent (W8)
+  lastExperiment: string | null; // technique currently being probed (W7)
 }
 
 export type EnergyKind =
@@ -498,7 +515,8 @@ export interface ValidationIssue {
     | 'missing_role'
     | 'impossible_counter'
     | 'broken_energy_source'
-    | 'missing_ecology';
+    | 'missing_ecology'
+    | 'implausible_treasury';
   detail: string;
   count: number;
 }
@@ -552,7 +570,11 @@ export type CouncilInterventionKind =
   | 'amplify_cult'
   | 'frame_rebel'
   | 'cause_false_miracle'
-  | 'seed_discovery_clue';
+  | 'seed_discovery_clue'
+  // W9 — manipulating the emergent systems (language / discovery / culture)
+  | 'distort_symbol'
+  | 'erase_discovery'
+  | 'sanctify_discovery';
 
 export interface CouncilLogEntry {
   cycle: number;
@@ -570,6 +592,8 @@ export interface HiddenCouncilState {
   nextKind: CouncilInterventionKind | null;
   secretLog: CouncilLogEntry[];
   watchedAgentIds: number[];
+  /** W1.3 — cycle of the last council energy spawn, to rate-limit energy creation. */
+  lastSpawnCycle: number;
 }
 
 export interface HiddenCouncilSummary {
@@ -619,6 +643,209 @@ export interface HistorySample {
   manipulation: number; // 0..1 Hidden Council
   dominantIdeology: TribeIdeology | null;
   eraLabel: string;
+  // W10 — autonomous-intelligence series (optional; older samples read as undefined)
+  languageDiversity?: number; // distinct invented words in use
+  discoveries?: number; // techniques discovered
+  cultures?: number; // active culture-element count
+}
+
+// ===========================================================================================
+// Autonomous intelligence (save v3). Introduced structurally in W2 with safe defaults and
+// populated by W3–W9 (perception/action, learning, evolution, language, discovery, culture).
+// All collections are plain arrays / records (no Maps) so they serialize like the rest of the
+// world with no special handling, and every field is optional so v1/v2 saves migrate forward.
+// ===========================================================================================
+
+/** The full action space (W3). Agents choose by utility, not a fixed cascade. */
+export type ActionKind =
+  | 'move_random'
+  | 'seek_energy'
+  | 'harvest'
+  | 'share'
+  | 'steal'
+  | 'avoid'
+  | 'follow'
+  | 'attack'
+  | 'signal'
+  | 'teach'
+  | 'imitate'
+  | 'build'
+  | 'trade'
+  | 'store_energy'
+  | 'experiment'
+  | 'investigate'
+  | 'worship'
+  | 'organize'
+  | 'migrate'
+  | 'rest';
+
+/** Compact, normalized snapshot of an agent's situation (W3). Recomputed each decision; not
+ *  stored on the agent (kept here so perception.ts and brain.ts share one shape). */
+export interface Perception {
+  energyFrac: number;
+  danger: number;
+  nearbyEnergy: number;
+  nearbyAllies: number;
+  nearbyEnemies: number;
+  nearbyCity: boolean;
+  tribeStability: number;
+  cityUnrest: number;
+  inequality: number;
+  scarcity: number;
+  trustNearby: number;
+  suspicionEvidence: number;
+  socialOpportunity: number;
+  experimentOpportunity: number;
+}
+
+/** One remembered (context, action, reward) triple — the substrate of lifetime learning (W4). */
+export interface ActionOutcomeMemory {
+  cycle: number;
+  contextHash: string;
+  action: ActionKind;
+  reward: number;
+  energyDelta: number;
+  trustDelta: number;
+  injuryDelta: number;
+  statusDelta: number;
+  reproductionDelta: number;
+}
+
+/** A learned/observed/taught proposition the agent holds with some confidence (W4/W8/W9). */
+export interface Belief {
+  id: string;
+  subject: string;
+  predicate: string;
+  object: string;
+  confidence: number;
+  source: 'direct' | 'observed' | 'taught' | 'rumor' | 'council' | 'culture';
+  lastUpdated: number;
+}
+
+/**
+ * An agent's learning brain (W4). Deterministic contextual-utility learning — NOT a neural
+ * network. `policyWeights` are inherited + slowly learned action biases; `qByContext` holds
+ * per-context value estimates; `actionMemory` is a capped outcome ring.
+ */
+export interface AgentBrain {
+  policyWeights: Partial<Record<ActionKind, number>>;
+  qByContext: Record<string, Partial<Record<ActionKind, number>>>;
+  actionMemory: ActionOutcomeMemory[];
+  beliefs: Belief[];
+  curiosityPressure: number;
+  experimentationBias: number;
+  imitationBias: number;
+  riskTolerance: number;
+  lastReward: number;
+  learningRate: number;
+  // Learning bookkeeping (W4) — snapshot of the last utility-chosen action, so its outcome can
+  // be scored at the next decision (delayed reward). Optional: absent until the first choice.
+  lastAction?: ActionKind | null;
+  lastContext?: string;
+  lastEnergyAtAction?: number;
+  lastSocialAtAction?: number;
+  // Experiment progress per hidden recipe (W7) — accrues when the agent chooses to experiment
+  // near the right materials; a discovery fires at threshold. Keyed by recipe id.
+  experimentProgress?: Record<string, number>;
+}
+
+/** An invented word: a token grounded in a meaning vector through repeated successful use (W6). */
+export interface SymbolToken {
+  token: string;
+  meaningVector: Record<string, number>;
+  confidence: number;
+  uses: number;
+  inventedBy: number;
+  inventedCycle: number;
+}
+
+/** An agent's personal vocabulary + which tribal dialect it speaks (W6). */
+export interface AgentLexicon {
+  tokens: SymbolToken[];
+  dialectId: number | null;
+}
+
+/** Emergent culture primitives (W8) — formed from repeated events, influencing (not dictating). */
+export interface CulturalNorm {
+  id: string;
+  subject: string;
+  valence: number; // -1 (taboo-leaning) .. 1 (valued)
+  strength: number;
+  originCycle: number;
+}
+export interface Law {
+  id: string;
+  rule: string;
+  strength: number;
+  enactedCycle: number;
+}
+export interface Taboo {
+  id: string;
+  subject: string;
+  strength: number;
+  originCycle: number;
+}
+export interface Myth {
+  id: string;
+  theme: string;
+  aboutId: number | null;
+  strength: number;
+  originCycle: number;
+}
+export interface TeachingEvent {
+  teacher: number;
+  learner: number;
+  topic: string;
+  cycle: number;
+}
+
+/** Hidden world physics for experimentation (W7) — written by the developer, never exposed to
+ *  agents. A recipe is a set of materials + an action mode that, with enough repetition, yields
+ *  a discovery. */
+export interface ExperimentRecipe {
+  materials: string[];
+  mode: string;
+  threshold: number;
+}
+
+/** What a discovery does to the world when it takes hold (W7). */
+export interface DiscoveryEffect {
+  kind: string;
+  magnitude: number;
+  target: string;
+}
+
+/** A technique discovered by experiment (W7). Spreads via teaching/culture; lost on collapse
+ *  unless archived. */
+export interface Discovery {
+  id: string;
+  kind: 'energy' | 'storage' | 'building' | 'social' | 'medicine' | 'council_anomaly';
+  discoveredBy: number;
+  tribeId: number | null;
+  cycle: number;
+  confidence: number;
+  recipe?: ExperimentRecipe;
+  effect: DiscoveryEffect;
+  spread: number;
+  archived: boolean;
+}
+
+/** Per-tribe culture memory (W8) — lexicon, norms/laws/taboos/myths, known discoveries,
+ *  teaching events, technology level. */
+export interface CultureMemory {
+  tribeId: number;
+  lexicon: SymbolToken[];
+  norms: CulturalNorm[];
+  laws: Law[];
+  taboos: Taboo[];
+  myths: Myth[];
+  discoveries: string[]; // known Discovery ids
+  teaching: TeachingEvent[];
+  techLevel: number;
+  archived: boolean;
+  // Accumulating, decaying signal levels (theft, generosity, anomaly, …) that drive when a norm/
+  // taboo/myth/law crystallizes (W8). Keyed by theme. Transient bookkeeping; serializes with the culture.
+  signals?: Record<string, number>;
 }
 
 /** Compact, serializable view of a tribe for the UI. */
@@ -637,6 +864,12 @@ export interface TribeSummary {
   cy: number;
   radius: number;
   atWarWith: string[]; // names of tribes this one is at war with
+  // W10 — emergent culture summary (W8) + dialect (W6) + technology (W7)
+  techLevel: number;
+  cultureNorms: string[];
+  cultureTaboos: string[];
+  cultureMyths: string[];
+  dialect: string[]; // sample of the tribe's shared invented words
 }
 
 /**
@@ -681,6 +914,12 @@ export interface WorldState {
   milestones: string[]; // fired first-of-kind milestone keys
   history: HistorySample[];
   hiddenCouncil: HiddenCouncilState;
+  // Autonomous intelligence (save v3). Optional so v1/v2 worlds migrate forward; defaulted in
+  // generateWorld + normalizeWorldState. Arrays/records only — serialize with no special handling.
+  discoveries?: Discovery[];
+  cultures?: CultureMemory[];
+  nextDiscoveryId?: number;
+  nextSymbolSeq?: number; // monotonic counter for deterministic token generation (W6)
 }
 
 /**
@@ -729,4 +968,11 @@ export interface EngineSnapshot {
   era: string;
   ruinsCount: number;
   roleCounts: Record<string, number>; // living agents by role
+  // W10 — autonomous-intelligence world metrics
+  languageDiversity: number; // distinct invented words in use
+  discoveryCount: number; // techniques discovered (W7)
+  cultureCount: number; // norms/laws/taboos/myths formed (W8)
+  investigatorPct: number; // 0..1 share of living agents investigating (W1.4/W9)
+  avgLearningReward: number; // mean last-reward across living brains (W4)
+  techLevel: number; // max tribe technology level (W7)
 }

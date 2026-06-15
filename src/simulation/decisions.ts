@@ -5,7 +5,12 @@ import { adjust, decayRelationships, ensureRel, sentiment } from './relationship
 import { decayMemory, remember } from './memory';
 import { emitSpeech } from './communication';
 import { resolveFight } from './conflict';
-import type { Agent, EnergySource, Tribe, WorldState } from './types';
+import { computePerception, emptyPerceptionInputs } from './perception';
+import { chooseNormalLifeState, contextHash, actionNoise } from './actions';
+import { learnFromOutcome, recordActionStart, imitate } from './brain';
+import { attemptExperiment } from './discovery';
+import { tabooStrength } from './culture';
+import type { Agent, City, CultureMemory, EnergySource, Tribe, WorldState } from './types';
 
 /** An agent re-evaluates its goal every N ticks (staggered by id to spread CPU load). */
 const DECISION_INTERVAL = 15;
@@ -23,6 +28,7 @@ export function updateAgent(
   grid: SpatialGrid,
   byId: Map<number, Agent>,
   tribesById: Map<number, Tribe>,
+  cultureByTribe: Map<number, CultureMemory>,
   rng: RNG,
 ): void {
   a.age += 1;
@@ -35,7 +41,7 @@ export function updateAgent(
 
   // Periodic re-decision + slow forgetting.
   if ((world.cycle + a.id) % DECISION_INTERVAL === 0) {
-    decide(a, world, grid, tribesById, rng);
+    decide(a, world, grid, byId, tribesById, cultureByTribe, rng);
     decayRelationships(a, 0.004);
     decayMemory(a, 0.002);
   }
@@ -56,11 +62,18 @@ function decide(
   a: Agent,
   world: WorldState,
   grid: SpatialGrid,
+  byId: Map<number, Agent>,
   tribesById: Map<number, Tribe>,
+  cultureByTribe: Map<number, CultureMemory>,
   rng: RNG,
 ): void {
   const frac = a.energy / a.maxEnergy;
   const myTribe = a.tribeId !== null ? tribesById.get(a.tribeId) : undefined;
+  // W8 — the agent's tribal culture (norms/taboos) bends both its theft impulse and its choices.
+  // W11 — looked up via the per-tick map (O(1)) rather than scanning world.cultures.
+  const myCulture =
+    SIM.enableCulture && a.tribeId !== null ? cultureByTribe.get(a.tribeId) : undefined;
+  const theftTaboo = tabooStrength(myCulture, 'theft');
   const wasProtesting = a.state === 'protesting';
   const protestTarget = a.targetAgentId;
 
@@ -82,6 +95,7 @@ function decide(
   let allyName: string | null = null;
   let bestSent = 0.3;
   let nearbyCount = 0;
+  const perc = emptyPerceptionInputs(); // W3 — perception accumulators, filled during the scan
 
   for (let i = 0; i < neighborScratch.length; i++) {
     const o = world.agents[neighborScratch[i]];
@@ -156,10 +170,19 @@ function decide(
       d < SIM.harvestRadius + 6 &&
       frac < SIM.lowEnergyFrac &&
       a.traits.aggression * a.traits.greed > 0.28 &&
-      o.energy > a.energy + 8
+      o.energy > a.energy + 8 &&
+      // W8 — a strong anti-theft taboo suppresses most opportunistic theft within the culture.
+      actionNoise(a.id, world.cycle, 23) > theftTaboo
     ) {
       applySteal(a, o, world.cycle);
     }
+
+    // W3 — accumulate perception inputs from this neighbor.
+    perc.trustSum += rel ? rel.trust : 0;
+    perc.trustCount += 1;
+    if (sent > 0.3) perc.nearbyAllies += 1;
+    if (hostility > CONFLICT.hostileThreshold) perc.nearbyEnemies += 1;
+    if (threat > perc.danger) perc.danger = threat;
   }
 
   // Hunger hysteresis (as in Stage 2): hungry below low, keep feeding until full.
@@ -197,8 +220,44 @@ function decide(
       a.state = 'searching_energy';
     }
     a.targetAgentId = null;
+  } else if (SIM.useUtilityBrain) {
+    // W3 — normal (non-emergency) life is chosen by action utility, not a rigid cascade.
+    // Survival/fear/protest/hunger were handled by the overrides above; everything a *fed* agent
+    // does is now learning-shapable (brain policy weights + per-context value, W4).
+    perc.socialOpportunity = Math.min(
+      1,
+      (followId >= 0 ? 0.5 : 0) + (allyId >= 0 ? 0.3 : 0) + (helpId >= 0 ? 0.2 : 0),
+    );
+    const myCity: City | undefined =
+      a.cityId !== null ? world.cities.find((c) => c.id === a.cityId) : undefined;
+    const perception = computePerception(a, world, perc, myTribe, myCity);
+    // W4 — score the outcome of the PREVIOUS chosen action before choosing the next one.
+    if (SIM.enableLearning) learnFromOutcome(a, world.cycle);
+    const choice = chooseNormalLifeState(
+      a,
+      perception,
+      {
+        helpId,
+        allyId,
+        followId,
+        leaderId: myTribe && myTribe.leaderId !== null ? myTribe.leaderId : -1,
+        discovery,
+      },
+      myTribe,
+      world.cycle,
+      myCulture,
+    );
+    a.state = choice.state;
+    a.targetAgentId = choice.target;
+    a.targetEnergyId = null;
+    // W7 — choosing to experiment/investigate probes nearby materials toward a hidden discovery.
+    if (SIM.enableDiscovery && (choice.action === 'experiment' || choice.action === 'investigate')) {
+      attemptExperiment(a, world);
+    }
+    // W4 — snapshot this choice so its reward can be measured at the next decision.
+    if (SIM.enableLearning) recordActionStart(a, choice.action, contextHash(perception, a.role));
   } else if (assignRoleState(a, helpId, allyId, myTribe, discovery)) {
-    // a.state + a.targetAgentId were set by assignRoleState
+    // a.state + a.targetAgentId were set by assignRoleState (legacy path)
     a.targetEnergyId = null;
   } else if (frac > 0.75 && a.traits.empathy > 0.5 && helpId >= 0) {
     a.state = 'helping';
@@ -230,6 +289,7 @@ function decide(
       leaderName: followName,
     },
     rng,
+    byId,
   );
 }
 
@@ -355,6 +415,9 @@ function act(
           const r = ensureRel(a, o.id, world.cycle);
           adjust(r, 'loyalty', 0.01);
           adjust(r, 'trust', 0.006);
+          // W5 — imitation: a follower slowly adopts the habits of the model it admires, so a
+          // thriving agent's learned strategy spreads through its followers within a generation.
+          if (SIM.enableLearning) imitate(a, o);
         }
       } else {
         fallbackWander(a, rng);

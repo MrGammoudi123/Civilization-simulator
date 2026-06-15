@@ -1,5 +1,6 @@
 import { RNG } from './rng';
 import { SIM } from './config';
+import { createBrain, createLexicon, inheritBrain } from './brain';
 import type { Agent, PersonalityTraits, WorldParams } from './types';
 
 // Procedural name generation — deterministic given the RNG stream.
@@ -60,7 +61,7 @@ function lifespan(rng: RNG): number {
 
 /** A founding agent (generation 1), placed randomly. */
 export function createAgent(id: number, rng: RNG, params: WorldParams): Agent {
-  return {
+  const a: Agent = {
     id,
     name: makeName(rng),
     x: rng.range(0, params.width),
@@ -87,13 +88,17 @@ export function createAgent(id: number, rng: RNG, params: WorldParams): Agent {
     bubble: null,
     alive: true,
   };
+  // Seeded after the literal (pure, no RNG draw) so the deterministic RNG order is unchanged.
+  a.brain = createBrain(a.traits);
+  a.lexicon = createLexicon();
+  return a;
 }
 
 /** A child spawned next to its parent, inheriting traits with mutation. */
 export function createChild(id: number, parent: Agent, rng: RNG): Agent {
   const angle = rng.range(0, Math.PI * 2);
   const d = rng.range(6, 16);
-  return {
+  const child: Agent = {
     id,
     name: makeName(rng),
     x: parent.x + Math.cos(angle) * d,
@@ -120,4 +125,10 @@ export function createChild(id: number, parent: Agent, rng: RNG): Agent {
     bubble: null,
     alive: true,
   };
+  // W5: inherit the parent's *learned* policy weights + learning params (mutated), so successful
+  // strategies pass down the generations. Pure — mutation uses the child-id hash, not the world
+  // RNG — so inheritance does not perturb the deterministic stream.
+  child.brain = inheritBrain(parent.brain, child.traits, id);
+  child.lexicon = createLexicon();
+  return child;
 }

@@ -81,6 +81,36 @@ export function AgentInspector({ engine }: { engine: Engine }) {
       </div>
 
       {d.lastMessage && <div className="ai-msg">“{d.lastMessage}”</div>}
+
+      <div className="ai-mind">
+        <div className="ai-row">
+          <span className="ai-k">Last reward</span>
+          <span className="mono">{d.lastReward >= 0 ? '+' : ''}{d.lastReward.toFixed(2)}</span>
+        </div>
+        <div className="ai-row">
+          <span className="ai-k">Words known</span>
+          <span className="mono">{d.knownSymbols}{d.dialectWord ? ` · “${d.dialectWord}”` : ''}</span>
+        </div>
+        {d.topCulture && (
+          <div className="ai-row">
+            <span className="ai-k">Culture</span>
+            <span className="mono">{d.topCulture}</span>
+          </div>
+        )}
+        {d.lastExperiment && (
+          <div className="ai-row">
+            <span className="ai-k">Experiment</span>
+            <span className="mono">{d.lastExperiment.replace(/_/g, ' ')}</span>
+          </div>
+        )}
+        {d.suspicionEvidence > 0 && (
+          <div className="ai-row">
+            <span className="ai-k">Council evidence</span>
+            <span className="mono">{d.suspicionEvidence}</span>
+          </div>
+        )}
+      </div>
+
       <div className="ai-foot">
         {d.relationships} relationships · {d.memories} memories · camera following
       </div>

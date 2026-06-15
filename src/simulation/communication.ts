@@ -1,4 +1,6 @@
 import { RNG } from './rng';
+import { SIM } from './config';
+import { speak, hearToken } from './language';
 import type {
   Agent,
   City,
@@ -308,7 +310,13 @@ function pushMessage(world: WorldState, m: ConversationMessage): void {
  * Called once per agent decision: decrement the speak cooldown and, if it fires, compose
  * and emit a message (sets the agent's bubble + appends to the conversation log).
  */
-export function emitSpeech(a: Agent, world: WorldState, ctx: SpeechCtx, rng: RNG): void {
+export function emitSpeech(
+  a: Agent,
+  world: WorldState,
+  ctx: SpeechCtx,
+  rng: RNG,
+  byId?: Map<number, Agent>,
+): void {
   if (a.bubble && a.bubble.until <= world.cycle) a.bubble = null;
   if (a.speakCooldown > 0) {
     a.speakCooldown -= 1;
@@ -325,7 +333,32 @@ export function emitSpeech(a: Agent, world: WorldState, ctx: SpeechCtx, rng: RNG
   if (!composed) return;
 
   a.speakCooldown = 3 + rng.int(0, 6); // in decision intervals
-  a.bubble = { text: composed.text, tone: composed.tone, until: world.cycle + BUBBLE_TICKS };
+
+  // W6 — the agent speaks in its own invented tokens, grounded in the message's meaning. The old
+  // human sentence is replaced by an *estimated* gloss derived from the tokens' meaning vectors;
+  // nearby listeners imitate the token, so words spread through social ties and drift into dialects.
+  let text = composed.text;
+  let tokens: string[] | undefined;
+  let estimatedMeaning: string | undefined;
+  let confidence: number | undefined;
+  if (SIM.emergentLanguage) {
+    const utt = speak(a, world, composed.category);
+    if (utt) {
+      text = utt.phrase;
+      tokens = utt.tokens;
+      estimatedMeaning = utt.meaning;
+      confidence = utt.confidence;
+      for (const lid of [composed.recipientId, ctx.allyId, ctx.leaderId]) {
+        if (lid != null && lid >= 0 && lid !== a.id) {
+          // W11 — O(1) lookup via the per-tick id index (was an O(n) world.agents.find).
+          const listener = byId ? byId.get(lid) : world.agents.find((x) => x.id === lid);
+          if (listener && listener.alive) hearToken(listener, utt.token);
+        }
+      }
+    }
+  }
+
+  a.bubble = { text, tone: composed.tone, until: world.cycle + BUBBLE_TICKS };
 
   pushMessage(world, {
     id: world.nextMessageId++,
@@ -334,11 +367,14 @@ export function emitSpeech(a: Agent, world: WorldState, ctx: SpeechCtx, rng: RNG
     speakerName: a.name,
     recipientId: composed.recipientId,
     recipientName: composed.recipientName,
-    text: composed.text,
+    text,
     tone: composed.tone,
     category: composed.category,
     x: a.x,
     y: a.y,
     tribeId: a.tribeId,
+    tokens,
+    estimatedMeaning,
+    confidence,
   });
 }

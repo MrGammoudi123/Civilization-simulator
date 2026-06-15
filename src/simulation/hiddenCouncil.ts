@@ -2,6 +2,8 @@ import { RNG } from './rng';
 import { COUNCIL } from './config';
 import { createAgent } from './agent';
 import { createEnergySource } from './energy';
+import { currentMaxSources } from './ecology';
+import { ensureCulture } from './culture';
 import { adjust, ensureRel } from './relationships';
 import { remember } from './memory';
 import { pushPulse } from './conflict';
@@ -33,6 +35,7 @@ export function createCouncil(): HiddenCouncilState {
     nextKind: null,
     secretLog: [],
     watchedAgentIds: [],
+    lastSpawnCycle: -1_000_000,
   };
 }
 
@@ -110,14 +113,32 @@ export function selectHiddenCouncilIntervention(world: WorldState): CouncilInter
     return opts[0];
   };
 
-  if (world.agents.length < 70) return 'spawn_energy';
-  if (eco && eco.scarcityIndex > 0.85) return 'spawn_hidden_energy';
-  if (c.discoveryRisk > COUNCIL.suspicion75) return rotate('cause_false_miracle', 'silence_investigator', 'plant_rumor');
+  // W1.3 — energy creation is rare + condition-limited (it was the engine of the ON utopia).
+  const canSpawn =
+    world.cycle - c.lastSpawnCycle >= COUNCIL.spawnCooldown &&
+    world.energySources.length < currentMaxSources(world);
+  if (world.agents.length < COUNCIL.spawnPopFloor && canSpawn) return 'spawn_energy';
+  if (eco && eco.scarcityIndex > COUNCIL.spawnScarcityFloor && canSpawn) return 'spawn_hidden_energy';
+
+  const hasDisc = Array.isArray(world.discoveries) && world.discoveries.length > 0;
+  if (c.discoveryRisk > COUNCIL.suspicion75) {
+    return rotate('cause_false_miracle', 'silence_investigator', 'distort_symbol', hasDisc ? 'sanctify_discovery' : 'plant_rumor', 'plant_rumor');
+  }
   if (c.discoveryRisk > COUNCIL.suspicion50) {
-    if (hasSuppressibleMemories(world)) return rotate('suppress_memory', 'silence_investigator', 'seed_discovery_clue', 'plant_rumor');
-    return rotate('silence_investigator', 'seed_discovery_clue', 'plant_rumor');
+    const pool: CouncilInterventionKind[] = hasDisc
+      ? ['silence_investigator', 'seed_discovery_clue', 'distort_symbol', 'erase_discovery', 'plant_rumor']
+      : ['silence_investigator', 'seed_discovery_clue', 'distort_symbol', 'plant_rumor'];
+    if (hasSuppressibleMemories(world)) return rotate('suppress_memory', ...pool);
+    return rotate(...pool);
   }
   if (e.rebellionRisk > 0.55) return rotate('protect_leader', 'frame_rebel');
+
+  // W1.3 — when the world is *too* calm, the council bends history toward tension rather than
+  // rescuing it (a director, not a guardian): selectively destabilize instead of helping.
+  if (e.unrestLevel < COUNCIL.overStableUnrest && e.inequalityIndex < COUNCIL.overStableInequality) {
+    return rotate('create_scarcity', 'corrupt_agent', 'frame_rebel', 'amplify_cult', 'system_glitch');
+  }
+
   if (e.inequalityIndex < 0.18) return 'create_scarcity';
   return rotate('plant_rumor', 'create_prophet', 'corrupt_agent', 'system_glitch', 'amplify_cult', 'seed_discovery_clue', 'secret_agent');
 }
@@ -127,17 +148,24 @@ function intervene(world: WorldState, kind: CouncilInterventionKind, rng: RNG): 
   const agents = world.agents;
   switch (kind) {
     case 'spawn_energy': {
-      const src = createEnergySource(world.nextEnergyId++, rng, world.params, 'rare');
-      world.energySources.push(src);
-      log(c, world.cycle, kind, 'Seeded a rich energy source to sustain the population.');
+      // W1.3 — gated by cap + cooldown; never let the council overflow carrying capacity.
+      if (world.energySources.length < currentMaxSources(world)) {
+        const src = createEnergySource(world.nextEnergyId++, rng, world.params, 'rare');
+        world.energySources.push(src);
+        c.lastSpawnCycle = world.cycle;
+        log(c, world.cycle, kind, 'Seeded a rich energy source to stave off extinction.');
+      }
       break;
     }
     case 'spawn_hidden_energy': {
-      const src = createEnergySource(world.nextEnergyId++, rng, world.params, 'renewable');
-      src.discovered = false;
-      world.energySources.push(src);
-      c.discoveryRisk = clamp01(c.discoveryRisk - 0.04);
-      log(c, world.cycle, kind, 'Hid a renewable spring in the wilds for the curious to find.');
+      if (world.energySources.length < currentMaxSources(world)) {
+        const src = createEnergySource(world.nextEnergyId++, rng, world.params, 'renewable');
+        src.discovered = false;
+        world.energySources.push(src);
+        c.lastSpawnCycle = world.cycle;
+        c.discoveryRisk = clamp01(c.discoveryRisk - 0.04);
+        log(c, world.cycle, kind, 'Hid a renewable spring in the wilds for the curious to find.');
+      }
       break;
     }
     case 'create_scarcity': {
@@ -153,8 +181,18 @@ function intervene(world: WorldState, kind: CouncilInterventionKind, rng: RNG): 
         if (leader && (!best || t.population > 0)) best = leader;
       }
       if (best) {
-        best.energy = best.maxEnergy;
-        log(c, world.cycle, kind, `Shielded ${best.name} from harm.`);
+        // W1.3 — partial shielding (not a full heal), and the favoritism breeds resentment in
+        // the leader's neighbors: a selective empowerment that adds tension, not a rescue.
+        best.energy = Math.min(best.maxEnergy, best.energy + best.maxEnergy * COUNCIL.protectHealFrac);
+        for (const a of agents) {
+          if (!a.alive || a.id === best.id) continue;
+          if (Math.hypot(a.x - best.x, a.y - best.y) < 150) {
+            const r = ensureRel(a, best.id, world.cycle);
+            adjust(r, 'resentment', 0.06);
+            adjust(r, 'trust', -0.03);
+          }
+        }
+        log(c, world.cycle, kind, `Shielded ${best.name} — the favoritism did not go unnoticed.`);
       }
       break;
     }
@@ -279,7 +317,8 @@ function intervene(world: WorldState, kind: CouncilInterventionKind, rng: RNG): 
         if (l && (!leader || t.population > 0)) leader = l;
       }
       if (leader) {
-        leader.energy = leader.maxEnergy;
+        // W1.3 — a partial "miracle": buys some awe/legitimacy, but wonder breeds suspicion.
+        leader.energy = Math.min(leader.maxEnergy, leader.energy + leader.maxEnergy * COUNCIL.protectHealFrac);
         for (const a of agents) {
           if (!a.alive || a.id === leader.id) continue;
           const r = ensureRel(a, leader.id, world.cycle);
@@ -322,6 +361,50 @@ function intervene(world: WorldState, kind: CouncilInterventionKind, rng: RNG): 
         // should be gated out by selection, but never log a useless act — penalize instead
         c.discoveryRisk = clamp01(c.discoveryRisk + COUNCIL.failedSuppressRisk);
         log(c, world.cycle, kind, 'A suppression found nothing — the watched are clean (suspicion grew).');
+      }
+      break;
+    }
+    case 'distort_symbol': {
+      // W9 — corrupt a word's meaning in a curious mind's lexicon: muddy the truth, sow suspicion
+      let target: Agent | null = null;
+      for (const a of agents) {
+        if (!a.alive || !a.lexicon || a.lexicon.tokens.length === 0) continue;
+        if (!target || a.traits.curiosity > target.traits.curiosity) target = a;
+      }
+      if (target && target.lexicon && target.lexicon.tokens.length > 0) {
+        const tk = target.lexicon.tokens[rng.int(0, target.lexicon.tokens.length)];
+        tk.meaningVector.anomaly = clamp01((tk.meaningVector.anomaly ?? 0) + 0.4);
+        tk.meaningVector.bad = clamp01((tk.meaningVector.bad ?? 0) + 0.2);
+        tk.confidence = clamp01(tk.confidence - 0.2);
+        c.discoveryRisk = clamp01(c.discoveryRisk + 0.04);
+        log(c, world.cycle, kind, `Distorted the meaning of "${tk.token}" in ${target.name}'s tongue.`);
+      }
+      break;
+    }
+    case 'erase_discovery': {
+      // W9 — wipe a technique from the record (knowledge suppression); the unexplained loss unsettles
+      if (Array.isArray(world.discoveries) && world.discoveries.length > 0) {
+        const idx = rng.int(0, world.discoveries.length);
+        const d = world.discoveries[idx];
+        world.discoveries.splice(idx, 1);
+        c.discoveryRisk = clamp01(c.discoveryRisk + 0.03);
+        log(c, world.cycle, kind, `Erased the knowledge of ${d.effect.kind} from the world.`);
+      }
+      break;
+    }
+    case 'sanctify_discovery': {
+      // W9 — turn a discovery into a sacred mystery instead of a method: religion, not science
+      if (Array.isArray(world.discoveries) && world.discoveries.length > 0) {
+        const d = world.discoveries.find((x) => x.tribeId !== null);
+        if (d && d.tribeId !== null) {
+          d.confidence = clamp01(d.confidence - 0.3);
+          const culture = ensureCulture(world, d.tribeId);
+          if (!culture.myths.some((m) => m.theme === 'anomaly')) {
+            culture.myths.push({ id: `myth-sanctify-${d.id}`, theme: 'anomaly', aboutId: d.discoveredBy, strength: 0.6, originCycle: world.cycle });
+          }
+          c.discoveryRisk = clamp01(c.discoveryRisk + 0.02);
+          log(c, world.cycle, kind, `Recast a discovery as a sacred mystery rather than a method.`);
+        }
       }
       break;
     }

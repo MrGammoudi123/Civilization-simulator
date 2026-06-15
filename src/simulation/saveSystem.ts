@@ -1,5 +1,6 @@
 import { createCouncil } from './hiddenCouncil';
 import { recalculateEconomy } from './economy';
+import { computeEcology } from './ecology';
 import { roleFromTraits } from './roles';
 import { normalizeWorldState, validateWorldState } from './validation';
 import type { Agent, Relationship, Tribe, TribeRelation, WorldState } from './types';
@@ -17,12 +18,15 @@ import type { Agent, Relationship, Tribe, TribeRelation, WorldState } from './ty
  *        fields) and then `normalizeWorldState` (rebuild membership, prune dead references,
  *        clean the council watchlist, recompute economy). Old v1 saves still load — they are
  *        migrated forward, never rejected.
+ *   v3 — adds the autonomous-intelligence model (W2): per-agent brain + lexicon, and world
+ *        discoveries + cultures. All new fields are optional and defaulted by `migrateSave` /
+ *        `normalizeWorldState`, so v1/v2 saves migrate forward losslessly.
  *
  * This module is intentionally free of any IndexedDB/DOM dependency so it can be unit
  * tested headlessly; storage/indexedDb.ts handles persistence.
  */
 
-export const SAVE_VERSION = 2;
+export const SAVE_VERSION = 3;
 
 type SerializedAgent = Omit<Agent, 'relationships'> & { relationships: [number, Relationship][] };
 type SerializedTribe = Omit<Tribe, 'relations'> & { relations: [number, TribeRelation][] };
@@ -38,8 +42,12 @@ export interface SaveData {
 }
 
 export function serializeWorld(world: WorldState, savedAt: number): SaveData {
-  // Phase 3: economy is derived — recompute it fresh so the saved snapshot is never stale.
+  // W1.1 — the exported save must already be self-consistent, not only repaired on load.
+  // Normalize membership/references, then recompute the derived economy + ecology, so a save
+  // taken at *any* tick (not just a batch boundary) serializes a consistent world.
+  normalizeWorldState(world);
   world.economy = recalculateEconomy(world);
+  world.ecology = computeEcology(world);
   return {
     version: SAVE_VERSION,
     savedAt,
@@ -89,6 +97,15 @@ export function migrateSave(data: SaveData): SaveData {
         if (typeof a.roleAssignedCycle !== 'number') a.roleAssignedCycle = 0;
       }
     }
+  }
+
+  // v1/v2 → v3 (W2): the autonomous-intelligence model. Structural defaults only — per-agent
+  // brains/lexicons are ensured in normalizeWorldState (which iterates agents on every load).
+  if (from < 3) {
+    w.discoveries ??= [];
+    w.cultures ??= [];
+    if (typeof w.nextDiscoveryId !== 'number') w.nextDiscoveryId = 0;
+    if (typeof w.nextSymbolSeq !== 'number') w.nextSymbolSeq = 0;
   }
 
   return { ...data, version: SAVE_VERSION };

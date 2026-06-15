@@ -10,6 +10,7 @@ import type {
   ChronicleEvent,
   CitySummary,
   ConversationMessage,
+  CultureMemory,
   EngineSnapshot,
   HistorySample,
   SpeedMultiplier,
@@ -155,12 +156,15 @@ export class Engine {
     for (const a of this.world.agents) names.set(a.id, a.name);
     const tribeNames = new Map<number, string>();
     for (const t of tribes) tribeNames.set(t.id, t.name);
+    const cultureByTribe = new Map<number, CultureMemory>();
+    for (const c of this.world.cultures ?? []) if (!c.archived) cultureByTribe.set(c.tribeId, c);
     return tribes.map((t) => {
       const atWarWith: string[] = [];
       for (const [otherId, rel] of t.relations) {
         const other = tribeNames.get(otherId);
         if (rel.war && other) atWarWith.push(other);
       }
+      const culture = cultureByTribe.get(t.id);
       return {
         id: t.id,
         name: t.name,
@@ -176,6 +180,12 @@ export class Engine {
         cy: t.cy,
         radius: t.radius,
         atWarWith,
+        // W10 — emergent culture / dialect / technology
+        techLevel: culture ? culture.techLevel : 0,
+        cultureNorms: culture ? culture.norms.map((n) => n.subject) : [],
+        cultureTaboos: culture ? culture.taboos.map((tb) => tb.subject) : [],
+        cultureMyths: culture ? culture.myths.map((m) => m.theme) : [],
+        dialect: culture ? culture.lexicon.slice(0, 6).map((tk) => tk.token) : [],
       };
     });
   }
@@ -206,16 +216,33 @@ export class Engine {
     let rivalries = 0;
     let protesters = 0;
     let fighters = 0;
+    // W10 — autonomous-intelligence metrics
+    let investigators = 0;
+    let rewardSum = 0;
+    let brainCount = 0;
+    const words = new Set<string>();
     for (let i = 0; i < agents.length; i++) {
       const a = agents[i];
       totalEnergy += a.energy;
       if (a.generation > maxGeneration) maxGeneration = a.generation;
       if (a.state === 'protesting') protesters += 1;
       else if (a.state === 'attacking') fighters += 1;
+      if (a.role === 'investigator') investigators += 1;
+      if (a.brain) {
+        rewardSum += a.brain.lastReward;
+        brainCount += 1;
+      }
+      if (a.lexicon) for (const tk of a.lexicon.tokens) words.add(tk.token);
       for (const r of a.relationships.values()) {
         if (r.friendship > 0.4) socialBonds += 1;
         if (r.rivalry > 0.6 || r.resentment > 0.6) rivalries += 1;
       }
+    }
+    let cultureCount = 0;
+    let techLevel = 0;
+    for (const c of this.world.cultures ?? []) {
+      cultureCount += c.norms.length + c.laws.length + c.taboos.length + c.myths.length;
+      if (c.techLevel > techLevel) techLevel = c.techLevel;
     }
     const population = agents.length;
     const eco = this.world.ecology;
@@ -275,6 +302,13 @@ export class Engine {
       era: this.world.era,
       ruinsCount: this.world.ruins.length,
       roleCounts: roleDistribution(this.world),
+      // W10 — autonomous-intelligence metrics
+      languageDiversity: words.size,
+      discoveryCount: Array.isArray(this.world.discoveries) ? this.world.discoveries.length : 0,
+      cultureCount,
+      investigatorPct: population > 0 ? investigators / population : 0,
+      avgLearningReward: brainCount > 0 ? rewardSum / brainCount : 0,
+      techLevel,
     };
   }
 
@@ -392,6 +426,38 @@ export class Engine {
       const t = this.world.tribes.find((x) => x.id === a.tribeId);
       tribeName = t ? t.name : null;
     }
+
+    // W10 — autonomous-intelligence detail
+    let dialectWord: string | null = null;
+    if (a.lexicon && a.lexicon.tokens.length > 0) {
+      let best = a.lexicon.tokens[0];
+      for (const tk of a.lexicon.tokens) if (tk.confidence * tk.uses > best.confidence * best.uses) best = tk;
+      dialectWord = best.token;
+    }
+    let suspicion = 0;
+    for (const m of a.memory) if (m.kind === 'suspected_council' || m.kind === 'discovered_anomaly') suspicion += 1;
+    let lastExperiment: string | null = null;
+    if (a.brain && a.brain.experimentProgress) {
+      let bestK: string | null = null;
+      let bestV = 0;
+      for (const k in a.brain.experimentProgress) {
+        const v = a.brain.experimentProgress[k];
+        if (v > bestV) {
+          bestV = v;
+          bestK = k;
+        }
+      }
+      lastExperiment = bestK;
+    }
+    let topCulture: string | null = null;
+    if (a.tribeId !== null) {
+      const c = (this.world.cultures ?? []).find((x) => x.tribeId === a.tribeId && !x.archived);
+      if (c) {
+        const el = [...c.norms.map((n) => n.subject), ...c.myths.map((m) => `myth:${m.theme}`), ...c.taboos.map((t) => `taboo:${t.subject}`)];
+        topCulture = el[0] ?? null;
+      }
+    }
+
     return {
       id: a.id,
       name: a.name,
@@ -408,6 +474,12 @@ export class Engine {
       relationships: a.relationships.size,
       x: a.x,
       y: a.y,
+      lastReward: a.brain ? a.brain.lastReward : 0,
+      knownSymbols: a.lexicon ? a.lexicon.tokens.length : 0,
+      dialectWord,
+      suspicionEvidence: suspicion,
+      topCulture,
+      lastExperiment,
     };
   }
 

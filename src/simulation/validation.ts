@@ -1,3 +1,4 @@
+import { TRIBE } from './config';
 import { recalculateEconomy } from './economy';
 import { computeEcology, emptyEcology } from './ecology';
 import { roleFromTraits } from './roles';
@@ -5,6 +6,7 @@ import { emptyPolitics } from './revolution';
 import { pruneDeadRelationships } from './relationships';
 import { sanitizeDeadMemory } from './memory';
 import { createCouncil } from './hiddenCouncil';
+import { ensureBrain, ensureLexicon } from './brain';
 import type { Agent, ValidationIssue, ValidationReport, WorldState } from './types';
 
 /**
@@ -67,10 +69,16 @@ export function normalizeWorldState(world: WorldState): WorldState {
   world.ruins = ensureArray(world.ruins);
   if (typeof world.nextRuinId !== 'number') world.nextRuinId = 0;
   if (typeof world.era !== 'string') world.era = 'Genesis';
+  // Autonomous intelligence (save v3) — default the new world collections.
+  world.discoveries = ensureArray(world.discoveries);
+  world.cultures = ensureArray(world.cultures);
+  if (typeof world.nextDiscoveryId !== 'number') world.nextDiscoveryId = 0;
+  if (typeof world.nextSymbolSeq !== 'number') world.nextSymbolSeq = 0;
   world.backgroundNodes = ensureArray(world.backgroundNodes);
   if (!world.hiddenCouncil) world.hiddenCouncil = createCouncil();
   if (!Array.isArray(world.hiddenCouncil.watchedAgentIds)) world.hiddenCouncil.watchedAgentIds = [];
   if (!Array.isArray(world.hiddenCouncil.secretLog)) world.hiddenCouncil.secretLog = [];
+  if (typeof world.hiddenCouncil.lastSpawnCycle !== 'number') world.hiddenCouncil.lastSpawnCycle = -1_000_000;
 
   // 1. indices of what currently exists
   const aliveIds = new Set<number>();
@@ -145,6 +153,9 @@ export function normalizeWorldState(world: WorldState): WorldState {
     sanitizeDeadMemory(a, aliveIds);
     if (!a.role) a.role = roleFromTraits(a);
     if (typeof a.roleAssignedCycle !== 'number') a.roleAssignedCycle = 0;
+    // Autonomous intelligence (save v3) — every agent must carry a brain + lexicon.
+    ensureBrain(a);
+    ensureLexicon(a);
   }
 
   // 6. Hidden Council must not watch the dead
@@ -273,6 +284,15 @@ export function validateWorldState(world: WorldState, fromVersion = 0): Validati
       brokenSrc += 1;
   }
   add('broken_energy_source', 'energy sources with broken amount/capacity', brokenSrc);
+
+  // W1.2 — implausible treasury: a tribe whose shared pool dwarfs its plausible carrying
+  // capacity (cap = base + per-capita) signals the unbounded-growth bug has reappeared.
+  let implausible = 0;
+  for (const t of world.tribes ?? []) {
+    const cap = TRIBE.sharedEnergyBaseCap + TRIBE.sharedEnergyPerCapita * (t.population ?? 0);
+    if (!Number.isFinite(t.sharedEnergy) || t.sharedEnergy > cap * 4) implausible += 1;
+  }
+  add('implausible_treasury', 'tribes whose sharedEnergy far exceeds its plausible cap', implausible);
 
   return { ok: issues.length === 0, fromVersion, issues };
 }

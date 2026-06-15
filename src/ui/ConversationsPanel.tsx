@@ -107,6 +107,12 @@ export function ConversationsPanel({ engine }: { engine: Engine }) {
               <span className="conv-speaker">{m.speakerName}</span>
               {m.recipientName && <span className="conv-arrow">→ {m.recipientName}</span>}
               <span className="conv-text">{m.text}</span>
+              {m.estimatedMeaning && (
+                <span className="conv-gloss" title="estimated meaning (inferred from the speaker's invented symbols)">
+                  ≈ {m.estimatedMeaning}
+                  {typeof m.confidence === 'number' ? ` ${Math.round(m.confidence * 100)}%` : ''}
+                </span>
+              )}
               <span className="conv-cat">{m.category}</span>
             </div>
           ))

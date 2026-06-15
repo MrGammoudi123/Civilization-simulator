@@ -27,6 +27,10 @@ const METRICS: Metric[] = [
   { key: 'protests', label: 'Protests', color: '#ffa657', fmt: (v) => v.toFixed(0) },
   { key: 'revolutions', label: 'Revolutions', color: '#ff6ad5', fmt: (v) => v.toFixed(0) },
   { key: 'discoveryRisk', label: 'Council risk', color: '#9aa0ff', fmt: (v) => (v * 100).toFixed(0) + '%' },
+  // W10 — autonomous-intelligence series
+  { key: 'languageDiversity', label: 'Language', color: '#5ad1c4', fmt: (v) => v.toFixed(0) },
+  { key: 'discoveries', label: 'Discoveries', color: '#facc55', fmt: (v) => v.toFixed(0) },
+  { key: 'cultures', label: 'Culture', color: '#c98bff', fmt: (v) => v.toFixed(0) },
 ];
 
 function Sparkline({ values, color }: { values: number[]; color: string }) {

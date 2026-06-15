@@ -12,9 +12,16 @@ import { ensureRel } from '../src/simulation/relationships';
 import { gini, recalculateEconomy } from '../src/simulation/economy';
 import { runCityEconomy } from '../src/simulation/cities';
 import { updateRevolutions } from '../src/simulation/revolution';
+import { chooseNormalLifeState, actionNoise } from '../src/simulation/actions';
+import { learnFromOutcome, recordActionStart, imitate } from '../src/simulation/brain';
+import { createChild } from '../src/simulation/agent';
+import { computePerception, emptyPerceptionInputs } from '../src/simulation/perception';
+import { speak, hearToken, wordFor } from '../src/simulation/language';
+import { attemptExperiment, loseDiscoveriesOnCollapse, discoveryCount } from '../src/simulation/discovery';
+import { updateCultures, cultureBias, tabooStrength, inheritCulture, cultureElementCount } from '../src/simulation/culture';
 import { serializeWorld, deserializeWorld, validateWorldState, normalizeWorldState } from '../src/simulation/saveSystem';
 import { planOffline, runOfflineEvolution } from '../src/simulation/offlineEvolution';
-import { createCouncil } from '../src/simulation/hiddenCouncil';
+import { createCouncil, selectHiddenCouncilIntervention } from '../src/simulation/hiddenCouncil';
 import { applyGodAction } from '../src/simulation/godMode';
 import { Engine } from '../src/simulation/engine';
 import type { City, Tribe, TribeIdeology, WorldState as WS } from '../src/simulation/types';
@@ -464,7 +471,7 @@ console.log('\nBehavior driven by history:');
   world.agents = [thief, victim];
   world.cycle = 14; // (14 + victim.id=1) % 15 === 0 -> a decision happens this tick
   const byId = reindex(world, grid);
-  updateAgent(victim, world, grid, byId, new Map(), rng);
+  updateAgent(victim, world, grid, byId, new Map(), new Map(), rng);
   assert(victim.state === 'fleeing' && victim.targetAgentId === 0, 'feared thief triggers fleeing');
   assert(victim.vx > 0 && victim.x > 820, 'victim moves away from the thief');
 }
@@ -492,7 +499,7 @@ console.log('\nBehavior driven by history:');
   world.agents = [giver, receiver];
   world.cycle = 14;
   const byId = reindex(world, grid);
-  updateAgent(receiver, world, grid, byId, new Map(), rng);
+  updateAgent(receiver, world, grid, byId, new Map(), new Map(), rng);
   assert(
     receiver.state === 'following_leader' && receiver.targetAgentId === 0,
     'helped agent follows its benefactor',
@@ -544,7 +551,8 @@ console.log('\nSave / load round-trip:');
   const json = JSON.stringify(save); // proves no Maps leak through (would serialize to {})
   const restored = deserializeWorld(JSON.parse(json));
 
-  assert(save.version === 2 && save.savedAt === 1717171717, 'save carries version + savedAt');
+  assert(save.version === 3 && save.savedAt === 1717171717, 'save carries version + savedAt');
+  assert(restored.agents.every((a) => !!a.brain && !!a.lexicon), 'restored agents carry a brain + lexicon (v3)');
   assert(restored.agents[0].relationships instanceof Map, 'agent relationships restored as a Map');
   assert(
     restored.tribes.length === 0 || restored.tribes[0].relations instanceof Map,
@@ -565,6 +573,22 @@ console.log('\nSave / load round-trip:');
   console.log('  restored  :', fa);
   console.log('  restored2 :', fb);
   assert(fa === fb, 'a normalized world round-trips losslessly and continues identically');
+
+  // W2 — a v2 save (no brain/lexicon/discoveries/cultures) migrates forward to v3 on load.
+  const v2raw = JSON.parse(json) as typeof save & { world: Record<string, unknown> };
+  v2raw.version = 2;
+  delete (v2raw.world as Record<string, unknown>).discoveries;
+  delete (v2raw.world as Record<string, unknown>).cultures;
+  delete (v2raw.world as Record<string, unknown>).nextDiscoveryId;
+  delete (v2raw.world as Record<string, unknown>).nextSymbolSeq;
+  for (const a of (v2raw.world as { agents: Array<Record<string, unknown>> }).agents) {
+    delete a.brain;
+    delete a.lexicon;
+  }
+  const upgraded = deserializeWorld(v2raw as unknown as Parameters<typeof deserializeWorld>[0]);
+  assert(Array.isArray(upgraded.discoveries) && Array.isArray(upgraded.cultures), 'v2→v3: world gains discoveries + cultures arrays');
+  assert(upgraded.agents.every((a) => !!a.brain && !!a.lexicon), 'v2→v3: every agent gains a brain + lexicon');
+  assert(validateWorldState(upgraded).ok, 'a migrated v2→v3 world validates clean');
 }
 
 // ---------------------------------------------------------------- tribe/city consistency (Phase 2)
@@ -675,7 +699,7 @@ console.log('\nResource ecology (Phase 4):');
   for (let t = 0; t < 8000; t++) run.tick();
   assert(w.ecology.lastRecoveryCycle > 0, 'a recovery bloom fired under sustained scarcity');
   assert(w.energySources.length > srcBefore, 'recovery added new sources (carrying capacity expanded)');
-  assert(w.energySources.length <= ECOLOGY.maxSources, 'source count stays bounded (energy is not infinite)');
+  assert(w.energySources.length <= ECOLOGY.absoluteMaxSources, 'source count stays bounded (energy is not infinite)');
   const backbone = w.energySources.filter((s) => s.kind === 'renewable' || s.kind === 'deep').length;
   assert(backbone > 0, 'the recovered field contains renewable/deep backbone sources');
   console.log(`  collapse→recovery: sources ${srcBefore}→${w.energySources.length}, natER=${w.ecology.totalNaturalEnergy.toFixed(0)}, scarcity=${w.ecology.scarcityIndex.toFixed(2)}`);
@@ -727,11 +751,296 @@ console.log('\nAgent roles & state diversity (Phase 5):');
   assert(states.size >= 5, 'agents occupy a diversity of active states (>=5 distinct)');
 }
 
+// ---------------------------------------------------------------- perception & action (W3)
+console.log('\nPerception & action utility (W3):');
+{
+  const rng = new RNG(0x9e3);
+  const a = createAgent(0, rng, WORLD_PARAMS);
+  const b = createAgent(1, rng, WORLD_PARAMS);
+  a.energy = 70;
+  b.energy = 70;
+  a.role = 'gatherer';
+  b.role = 'gatherer';
+  const perc = {
+    energyFrac: 0.7, danger: 0, nearbyEnergy: 0.5, nearbyAllies: 0.1, nearbyEnemies: 0,
+    nearbyCity: false, tribeStability: 0.5, cityUnrest: 0, inequality: 0.1, scarcity: 0.2,
+    trustNearby: 0.3, suspicionEvidence: 0, socialOpportunity: 0.4, experimentOpportunity: 0.3,
+  };
+  const ctx = { helpId: -1, allyId: -1, followId: -1, leaderId: -1, discovery: 0 };
+  // Policy weights (the substrate W4 learning will drive) must steer the choice.
+  a.brain!.policyWeights = { rest: 5 };
+  b.brain!.policyWeights = { seek_energy: 5 };
+  const ca = chooseNormalLifeState(a, perc, ctx, undefined, 100);
+  const cb = chooseNormalLifeState(b, perc, ctx, undefined, 100);
+  console.log(`  A(rest-biased)→${ca.state}  B(seek-biased)→${cb.state}`);
+  assert(ca.state === 'resting', 'policy weights steer choice: a rest-biased agent rests');
+  assert(cb.state === 'searching_energy', 'policy weights steer choice: a seek-biased agent forages');
+  const ca2 = chooseNormalLifeState(a, perc, ctx, undefined, 100);
+  assert(ca.state === ca2.state && ca.action === ca2.action, 'utility selection is deterministic');
+  assert(
+    actionNoise(7, 100, 1) === actionNoise(7, 100, 1) && actionNoise(7, 100, 1) !== actionNoise(7, 100, 2),
+    'action noise is a deterministic, salt-sensitive hash (not a world-RNG draw)',
+  );
+
+  // perception fields computed for a real agent are finite + normalized
+  const run = makeRun(0x9e3a);
+  for (let t = 0; t < 600; t++) run.tick();
+  const live = run.world.agents.find((x) => x.alive)!;
+  const p = computePerception(live, run.world, emptyPerceptionInputs(), undefined, undefined);
+  const nums = Object.values(p).filter((v) => typeof v === 'number') as number[];
+  assert(nums.every((v) => Number.isFinite(v) && v >= 0 && v <= 1), 'perception fields are finite + normalized to [0,1]');
+  console.log(`  perception sample: energyFrac=${p.energyFrac.toFixed(2)} scarcity=${p.scarcity.toFixed(2)} danger=${p.danger.toFixed(2)}`);
+}
+
+// ---------------------------------------------------------------- lifetime learning (W4)
+console.log('\nLifetime learning (W4):');
+{
+  const rng = new RNG(0x1ea2);
+  const learner = createAgent(0, rng, WORLD_PARAMS);
+  const br = learner.brain!;
+  // reward 'seek_energy' (energy gained), then punish 'rest' (energy lost), in the same context
+  for (let i = 0; i < 30; i++) {
+    learner.energy = 50;
+    recordActionStart(learner, 'seek_energy', 'ctxA');
+    learner.energy = 70; // foraging found energy
+    learnFromOutcome(learner, i);
+  }
+  for (let i = 0; i < 30; i++) {
+    learner.energy = 70;
+    recordActionStart(learner, 'rest', 'ctxA');
+    learner.energy = 55; // drained while idle
+    learnFromOutcome(learner, i + 100);
+  }
+  const ws = br.policyWeights;
+  const qa = br.qByContext['ctxA'] ?? {};
+  console.log(`  policyWeights seek=${(ws.seek_energy ?? 0).toFixed(2)} rest=${(ws.rest ?? 0).toFixed(2)}; Q[ctxA] seek=${(qa.seek_energy ?? 0).toFixed(2)} rest=${(qa.rest ?? 0).toFixed(2)}; memory=${br.actionMemory.length}`);
+  assert((ws.seek_energy ?? 0) > (ws.rest ?? 0), 'a rewarded action gains policy preference over a punished one');
+  assert((qa.seek_energy ?? 0) > (qa.rest ?? 0), 'per-context value learns: the rewarded action has the higher Q');
+  assert(br.actionMemory.length > 0 && br.actionMemory.length <= 16, 'action-outcome memory accrues and stays capped');
+
+  // two agents, opposite reward histories → different learned preferences (W4 acceptance)
+  const A = createAgent(1, rng, WORLD_PARAMS);
+  const B = createAgent(2, rng, WORLD_PARAMS);
+  for (let i = 0; i < 25; i++) {
+    A.energy = 50; recordActionStart(A, 'seek_energy', 'c'); A.energy = 72; learnFromOutcome(A, i);
+    B.energy = 50; recordActionStart(B, 'rest', 'c'); B.energy = 72; learnFromOutcome(B, i);
+  }
+  assert((A.brain!.policyWeights.seek_energy ?? 0) > (B.brain!.policyWeights.seek_energy ?? 0), 'agents with different histories develop different policy weights');
+
+  // a live run exercises learning end-to-end
+  const run = makeRun(0x1ea2b);
+  for (let t = 0; t < 4000; t++) run.tick();
+  const withMem = run.world.agents.filter((a) => a.alive && a.brain && a.brain.actionMemory.length > 0).length;
+  const withW = run.world.agents.filter((a) => a.alive && a.brain && Object.keys(a.brain.policyWeights).length > 0).length;
+  console.log(`  live run: ${withMem} agents accrued action memory, ${withW} have learned policy weights`);
+  assert(withMem > 0 && withW > 0, 'agents learn from outcomes during a live run');
+}
+
+// ---------------------------------------------------------------- evolution (W5)
+console.log('\nGenetic + cultural evolution (W5):');
+{
+  const rng = new RNG(0x5e5);
+  const parent = createAgent(0, rng, WORLD_PARAMS);
+  parent.brain!.policyWeights = { build: 1.5, steal: -1.2, trade: 0.8 };
+  parent.brain!.learningRate = 0.2;
+  parent.brain!.imitationBias = 0.5;
+  const child = createChild(500, parent, rng);
+  const cw = child.brain!.policyWeights;
+  console.log(`  child inherited: build=${(cw.build ?? 0).toFixed(2)} steal=${(cw.steal ?? 0).toFixed(2)} trade=${(cw.trade ?? 0).toFixed(2)}`);
+  assert(cw.build !== undefined && cw.steal !== undefined && cw.trade !== undefined, 'child inherits the parent action-weight genes');
+  assert((cw.build ?? 0) > 0.5 && (cw.steal ?? 0) < -0.5, 'inherited weights track the parent (build favored, steal avoided)');
+  assert(cw.build !== parent.brain!.policyWeights.build, 'inheritance applies mutation (not an exact copy)');
+  assert(child.brain!.actionMemory.length === 0 && Object.keys(child.brain!.qByContext).length === 0, 'lifetime learning (memory/Q) is NOT inherited — each child learns its own');
+
+  // imitation: a follower adopts a successful model's preference over time
+  const learner = createAgent(1, rng, WORLD_PARAMS);
+  const model = createAgent(2, rng, WORLD_PARAMS);
+  learner.brain!.imitationBias = 1;
+  learner.brain!.policyWeights = { build: 0 };
+  model.brain!.policyWeights = { build: 2 };
+  const before = learner.brain!.policyWeights.build ?? 0;
+  for (let i = 0; i < 20; i++) imitate(learner, model);
+  const after = learner.brain!.policyWeights.build ?? 0;
+  console.log(`  imitation: learner build weight ${before.toFixed(2)} → ${after.toFixed(2)} (model=2.0)`);
+  assert(after > before + 0.3, 'imitation moves a follower toward a successful model');
+}
+
+// ---------------------------------------------------------------- emergent language (W6)
+console.log('\nEmergent language (W6):');
+{
+  const w = makeRun(0x106).world; // full world (has nextSymbolSeq)
+  const a1 = w.agents[0];
+  const a2 = w.agents[1];
+  const b1 = w.agents[2];
+
+  const u1 = speak(a1, w, 'fear')!;
+  assert(!!u1 && u1.tokens.length > 0, 'an agent invents a token to speak a concept');
+  assert(u1.meaning.includes('danger'), 'UI can infer meaning from the token vector (fear → danger)');
+  const conf0 = u1.confidence;
+  const u1b = speak(a1, w, 'fear')!;
+  assert(u1b.phrase === u1.phrase && u1b.confidence > conf0, 'reusing a token raises its confidence');
+
+  hearToken(a2, u1.token);
+  assert(wordFor(a2, 'fear') !== null, 'a listener imitates — it adopts a word for the concept it heard');
+
+  const ub = speak(b1, w, 'fear')!;
+  assert(ub.phrase !== u1.phrase, 'an independent agent coins a different word for the same concept (dialect divergence)');
+
+  console.log(`  a1 "fear"=${u1.phrase} [${u1.meaning}]  b1 "fear"=${ub.phrase}  a2 adopted=${wordFor(a2, 'fear')}`);
+
+  // live run: tokens spread, messages carry token phrases, many words are coined
+  const run = makeRun(0x106b);
+  for (let t = 0; t < 4000; t++) run.tick();
+  const withLex = run.world.agents.filter((a) => a.alive && a.lexicon && a.lexicon.tokens.length > 0).length;
+  const msgTok = run.world.conversationLog.filter((m) => m.tokens && m.tokens.length > 0).length;
+  const words = new Set(run.world.agents.flatMap((a) => (a.lexicon ? a.lexicon.tokens.map((t) => t.token) : [])));
+  console.log(`  live: ${withLex} agents have lexicons, ${msgTok}/${run.world.conversationLog.length} logged msgs carry tokens, ${words.size} distinct words coined`);
+  assert(withLex > 0, 'agents accumulate lexicons during a live run');
+  assert(msgTok > 0, 'spoken messages carry emergent token phrases (not hardcoded sentences)');
+  assert(words.size > 1, 'multiple distinct words are coined (no single scripted vocabulary)');
+}
+
+// ---------------------------------------------------------------- technology discovery (W7)
+console.log('\nAutonomous discovery (W7):');
+{
+  const w = generateWorld(0x707);
+  const a = w.agents[0];
+  a.x = 800;
+  a.y = 500;
+  a.cityId = 0;
+  a.tribeId = 0;
+  w.cities = [
+    {
+      id: 0, tribeId: 0, name: 'Probe', x: 800, y: 500, population: 1, storedEnergy: 50,
+      taxRate: 0.1, classElite: 0, classMiddle: 0, classPoor: 1, inequality: 0, unrest: 0,
+      buildings: [{ type: 'energy_storage', dx: 0, dy: 0, level: 1, damaged: false }],
+      leaderId: a.id, foundedCycle: 0, history: [],
+    },
+  ] as unknown as typeof w.cities;
+  w.energySources = [{ id: 0, x: 810, y: 500, amount: 50, capacity: 100, regen: 0.2, radius: 12, kind: 'common', discovered: true }];
+  w.discoveries = [];
+  w.nextDiscoveryId = 0;
+  const regenBefore = w.energySources[0].regen;
+  for (let i = 0; i < 12; i++) attemptExperiment(a, w);
+  console.log(`  forced: discoveries=${discoveryCount(w)} regen ${regenBefore}→${w.energySources[0].regen.toFixed(2)}`);
+  assert(discoveryCount(w) > 0, 'repeated experimentation near the right materials yields a discovery');
+  assert(w.energySources[0].regen > regenBefore, 'an energy discovery improves the ecology (faster regen)');
+  assert(w.energySources[0].regen <= 1.31, 'discovery effects are bounded (no infinite energy)');
+
+  // lost on collapse unless archived
+  const d = w.discoveries![0];
+  d.tribeId = 0;
+  d.archived = false;
+  loseDiscoveriesOnCollapse(w, 0);
+  assert(discoveryCount(w) === 0, 'un-archived technology is lost when its tribe collapses');
+  w.discoveries = [{ ...d, archived: true }];
+  loseDiscoveriesOnCollapse(w, 0);
+  assert(discoveryCount(w) === 1, 'archived technology survives a collapse (preserved for successors)');
+
+  // live run: a long-lived world discovers techniques on its own
+  const run = makeRun(0x707b);
+  for (let t = 0; t < 12000; t++) run.tick();
+  const kinds = new Set((run.world.discoveries ?? []).map((x) => x.effect.kind));
+  console.log(`  live: ${discoveryCount(run.world)} discoveries across ${kinds.size} techniques: ${[...kinds].join(', ')}`);
+  assert(discoveryCount(run.world) > 0, 'agents discover at least one technique autonomously in a long run');
+}
+
+// ---------------------------------------------------------------- culture (W8)
+console.log('\nCulture (W8):');
+{
+  const mkMem = (kind: string) => [{ cycle: 0, kind, otherId: null, x: null, y: null, strength: 0.5 }];
+  const seedTribe = (seed: number, kind: string) => {
+    const w = generateWorld(seed);
+    const leader = w.agents[0];
+    w.tribes = [{ id: 0, name: kind === 'shared_energy' ? 'Givers' : 'Thieves', leaderId: leader.id } as unknown as (typeof w.tribes)[number]];
+    w.cultures = [];
+    for (const m of w.agents.slice(0, 10)) {
+      m.tribeId = 0;
+      m.memory = mkMem(kind) as unknown as typeof m.memory;
+    }
+    for (let i = 0; i < 8; i++) {
+      w.cycle = i * 30;
+      updateCultures(w);
+    }
+    return w.cultures.find((c) => c.tribeId === 0)!;
+  };
+
+  const givers = seedTribe(0x808, 'shared_energy');
+  const thieves = seedTribe(0x809, 'stolen_from');
+  console.log(`  Givers: norms=${givers.norms.map((n) => n.subject)} taboos=${givers.taboos.map((t) => t.subject)}`);
+  console.log(`  Thieves: norms=${thieves.norms.map((n) => n.subject)} taboos=${thieves.taboos.map((t) => t.subject)}`);
+  assert(givers.norms.some((n) => n.subject === 'generosity'), 'repeated sharing crystallizes a generosity norm');
+  assert(cultureBias(givers, 'share') > 0, 'culture biases behavior — a generosity norm boosts sharing');
+  assert(thieves.taboos.some((t) => t.subject === 'theft'), 'repeated theft crystallizes an anti-theft taboo');
+  assert(tabooStrength(thieves, 'theft') > 0, 'a taboo has measurable strength (suppresses the act)');
+  assert(!thieves.norms.some((n) => n.subject === 'generosity'), 'two tribes with different histories develop different cultures');
+
+  // inheritance: a fallen culture passes a fragment to a successor
+  const w = generateWorld(0x808);
+  w.tribes = [{ id: 0, name: 'Old', leaderId: w.agents[0].id } as unknown as (typeof w.tribes)[number]];
+  w.cultures = [];
+  for (const m of w.agents.slice(0, 10)) {
+    m.tribeId = 0;
+    m.memory = mkMem('shared_energy') as unknown as typeof m.memory;
+  }
+  for (let i = 0; i < 8; i++) {
+    w.cycle = i * 30;
+    updateCultures(w);
+  }
+  w.cultures[0].archived = true;
+  const ok = inheritCulture(w, 5);
+  const heir = w.cultures.find((c) => c.tribeId === 5);
+  assert(ok && !!heir && (heir.norms.length > 0 || heir.myths.length > 0), 'a successor inherits a fragment of a fallen culture');
+
+  // live run: cultures form on their own
+  const run = makeRun(0x808b);
+  for (let t = 0; t < 14000; t++) run.tick();
+  console.log(`  live: ${(run.world.cultures ?? []).length} cultures, ${cultureElementCount(run.world)} norms/laws/taboos/myths`);
+  assert(cultureElementCount(run.world) > 0, 'cultures form from repeated events in a live run');
+}
+
+// ---------------------------------------------------------------- council × emergent (W9)
+console.log('\nHidden Council × emergent systems (W9):');
+{
+  // at high suspicion with discoveries present, the council can target the emergent systems
+  const w = generateWorld(0x909);
+  w.hiddenCouncil.enabled = true;
+  w.hiddenCouncil.discoveryRisk = 0.8;
+  w.discoveries = [
+    { id: 'x#0', kind: 'energy', discoveredBy: 0, tribeId: 0, cycle: 0, confidence: 0.5, effect: { kind: 'energy_harvest', magnitude: 1, target: 'energy' }, spread: 0.1, archived: false },
+  ];
+  const picked = selectHiddenCouncilIntervention(w);
+  console.log(`  high-suspicion pick: ${picked}`);
+  assert(
+    ['cause_false_miracle', 'silence_investigator', 'distort_symbol', 'sanctify_discovery', 'plant_rumor'].includes(picked),
+    'at high suspicion with discoveries, the council can target the emergent systems',
+  );
+
+  // ON vs OFF diverge in culture + language + discovery (the council bends what emerges)
+  const off = makeRun(0xc0ffee);
+  const on = makeRun(0xc0ffee);
+  on.world.hiddenCouncil.enabled = true;
+  for (let t = 0; t < 14000; t++) {
+    off.tick();
+    on.tick();
+  }
+  const tokensOf = (run: typeof off) => new Set(run.world.agents.flatMap((a) => (a.lexicon ? a.lexicon.tokens.map((t) => t.token) : []))).size;
+  const offSig = `${cultureElementCount(off.world)}/${tokensOf(off)}/${discoveryCount(off.world)}`;
+  const onSig = `${cultureElementCount(on.world)}/${tokensOf(on)}/${discoveryCount(on.world)}`;
+  const onKinds = new Set(on.world.hiddenCouncil.secretLog.map((l) => l.kind));
+  console.log(`  culture/words/disc — OFF ${offSig} vs ON ${onSig}; recent ON kinds: ${[...onKinds].join(',')}`);
+  assert(offSig !== onSig, 'Council ON produces a different culture/language/technology landscape than OFF');
+  assert(on.world.hiddenCouncil.discoveryRisk > 0, 'the council raises suspicion when enabled');
+}
+
 // ----------------------------------------- politics / chronicle / memory (Phases 6–11)
 console.log('\nPolitics / chronicle / memory (Phases 6–11):');
 {
+  // With the full learning/language/culture stack active, agents are far more dynamic and the
+  // first revolutions fire early (~cycle 15k for this seed); 22k captures them with margin while
+  // keeping the suite fast.
   const run = makeRun(0xc0ffee);
-  for (let t = 0; t < 14000; t++) run.tick();
+  for (let t = 0; t < 22000; t++) run.tick();
   const w = run.world;
   const cats: Record<string, number> = {};
   for (const e of w.chronicle) cats[e.category] = (cats[e.category] ?? 0) + 1;
@@ -862,6 +1171,74 @@ console.log('\nAgent selection / inspector:');
   assert(!!d && typeof d.energy === 'number' && d.traits !== undefined, 'inspector detail is populated');
   e.selectAgentAt(1e9, 1e9, 5); // far away
   assert(e.getSelectedAgent() === null, 'clicking empty space deselects');
+}
+
+// ---------------------------------------------------------------- UI snapshot data (W10)
+console.log('\nUI snapshot data (W10):');
+{
+  const e = new Engine(0x5e1ec7);
+  for (let i = 0; i < 4000; i++) e.step();
+  const snap = e.snapshot();
+  console.log(`  snapshot: lang=${snap.languageDiversity} disc=${snap.discoveryCount} culture=${snap.cultureCount} investPct=${(snap.investigatorPct * 100).toFixed(0)}% tech=${snap.techLevel} avgReward=${snap.avgLearningReward.toFixed(2)}`);
+  assert(typeof snap.languageDiversity === 'number' && snap.languageDiversity >= 0, 'snapshot carries languageDiversity');
+  assert(typeof snap.discoveryCount === 'number' && typeof snap.cultureCount === 'number', 'snapshot carries discovery + culture counts');
+  assert(typeof snap.investigatorPct === 'number' && typeof snap.avgLearningReward === 'number', 'snapshot carries investigator% + avg learning reward');
+  assert(snap.languageDiversity > 0, 'emergent language is surfaced to the UI');
+
+  const w = e.getWorld();
+  const a0 = w.agents.find((a) => a.alive)!;
+  e.selectAgentAt(a0.x, a0.y, 9999);
+  const d = e.getSelectedAgent();
+  assert(!!d && typeof d.lastReward === 'number' && typeof d.knownSymbols === 'number', 'agent inspector detail carries learning + language fields');
+
+  const ts = e.getTribesSummary();
+  assert(ts.every((x) => Array.isArray(x.cultureNorms) && Array.isArray(x.dialect) && typeof x.techLevel === 'number'), 'tribe summaries carry culture + dialect + tech');
+
+  const hist = e.getHistory();
+  const hs = hist[hist.length - 1];
+  assert(!hs || typeof hs.languageDiversity === 'number', 'history samples carry the W10 series');
+}
+
+// ---------------------------------------------------------------- performance & caps (W11)
+console.log('\nPerformance & caps (W11):');
+{
+  const run = makeRun(0xca95);
+  const t0 = Date.now();
+  const capCycles = 12000; // caps fill within a few thousand cycles; this proves they hold + reports perf
+  for (let t = 0; t < capCycles; t++) run.tick();
+  const ms = Date.now() - t0;
+  const w = run.world;
+  let maxLex = 0;
+  let maxMem = 0;
+  let maxQ = 0;
+  let maxRel = 0;
+  let maxAgentMem = 0;
+  for (const a of w.agents) {
+    if (a.lexicon) maxLex = Math.max(maxLex, a.lexicon.tokens.length);
+    if (a.brain) {
+      maxMem = Math.max(maxMem, a.brain.actionMemory.length);
+      maxQ = Math.max(maxQ, Object.keys(a.brain.qByContext).length);
+    }
+    maxRel = Math.max(maxRel, a.relationships.size);
+    maxAgentMem = Math.max(maxAgentMem, a.memory.length);
+  }
+  let maxDialect = 0;
+  for (const c of w.cultures ?? []) maxDialect = Math.max(maxDialect, c.lexicon.length);
+  const saveKB = JSON.stringify(serializeWorld(w, 1)).length / 1024;
+  console.log(`  ${capCycles} cycles in ${ms}ms (${Math.round((capCycles / ms) * 1000)} cyc/s); pop=${w.agents.filter((a) => a.alive).length} save=${saveKB.toFixed(0)}KB`);
+  console.log(`  caps — lex ${maxLex}/24, actMem ${maxMem}/16, qCtx ${maxQ}/32, rel ${maxRel}/16, mem ${maxAgentMem}/20, dialect ${maxDialect}/16, disc ${(w.discoveries ?? []).length}/300, cultures ${(w.cultures ?? []).length}/200, log ${w.conversationLog.length}/500, chron ${w.chronicle.length}/2000, hist ${w.history.length}/1500`);
+  assert(maxLex <= 24, 'agent lexicon stays within cap');
+  assert(maxMem <= 16, 'action-outcome memory stays within cap');
+  assert(maxQ <= 32, 'per-context value table stays within cap');
+  assert(maxRel <= 16, 'relationships stay within cap');
+  assert(maxAgentMem <= 20, 'episodic memory stays within cap');
+  assert(maxDialect <= 16, 'tribe dialect stays within cap');
+  assert((w.discoveries ?? []).length <= 300, 'discovery registry stays within cap');
+  assert((w.cultures ?? []).length <= 200, 'culture registry stays within cap');
+  assert(
+    w.conversationLog.length <= 500 && w.chronicle.length <= 2000 && w.history.length <= 1500,
+    'log / chronicle / history ring buffers stay bounded',
+  );
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
